@@ -109,7 +109,7 @@ else
   exec /usr/bin/ffmpeg.real "$@"
 fi
 EOF
-  chmod 0755 /usr/local/bin/ffmpeg
+RUN chmod 0755 /usr/local/bin/ffmpeg
 
 # Copy built app + templates
 COPY --from=builder /src/target/*/release/app /usr/local/bin/vod2pod
