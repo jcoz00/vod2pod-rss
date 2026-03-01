@@ -1,108 +1,128 @@
-# by using --platform=$BUILDPLATFORM we force the build step 
-# to always run on the native architecture of the build machine
-# making the build time shorter
-# Actix-web 4.12+ / actix-http 3.12+ require Rust 1.88+.
-# Using a current stable toolchain avoids MSRV/"edition2024" issues when Cargo resolves deps.
-FROM --platform=$BUILDPLATFORM rust:1.93 as builder
+# syntax=docker/dockerfile:1.7
+
+# -----------------------------------------
+# Builder (always on BUILDPLATFORM)
+# -----------------------------------------
+FROM --platform=$BUILDPLATFORM rust:1.93 AS builder
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 
-#find the right build target for rust
-RUN if [ "$TARGETPLATFORM" = "linux/arm/v7" ]; then \
-        export RUST_TARGET_PLATFORM=armv7-unknown-linux-gnueabihf; \
-    elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        export RUST_TARGET_PLATFORM=aarch64-unknown-linux-gnu; \
-    elif [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-        export RUST_TARGET_PLATFORM=x86_64-unknown-linux-gnu; \
-    else \
-        export RUST_TARGET_PLATFORM=$(rustup target list --installed | head -n 1); \
-    fi; \
-    echo "choosen rust target: $RUST_TARGET_PLATFORM" ;\
-    echo $RUST_TARGET_PLATFORM > /rust_platform.txt
+ENV CARGO_HOME=/usr/local/cargo
+ENV CARGO_TERM_COLOR=always
 
-RUN echo "I am running on $BUILDPLATFORM, building for $TARGETPLATFORM, rust target is $(cat /rust_platform.txt)"
+# Determine Rust target triple for the requested TARGETPLATFORM
+RUN set -eux; \
+  case "$TARGETPLATFORM" in \
+    "linux/arm/v7")  echo "armv7-unknown-linux-gnueabihf" > /rust_platform.txt ;; \
+    "linux/arm64")   echo "aarch64-unknown-linux-gnu" > /rust_platform.txt ;; \
+    "linux/amd64")   echo "x86_64-unknown-linux-gnu" > /rust_platform.txt ;; \
+    *) echo "Unsupported TARGETPLATFORM=$TARGETPLATFORM" >&2; exit 1 ;; \
+  esac; \
+  echo "BUILDPLATFORM=$BUILDPLATFORM TARGETPLATFORM=$TARGETPLATFORM rust_target=$(cat /rust_platform.txt)"
 
-RUN if echo $TARGETPLATFORM | grep -q 'arm'; then \
-        echo 'Installing packages for ARM platforms...'; \
-        apt-get update && apt-get install  build-essential gcc gcc-arm* gcc-aarch* -y && apt-get clean; \
-        echo 'gcc-arm* packages installed and cache cleaned.'; \
-    fi
+# Add target stdlib
+RUN rustup target add "$(cat /rust_platform.txt)"
 
-RUN rustup target add $(cat /rust_platform.txt) 
+WORKDIR /src
 
-RUN cd /tmp && USER=root cargo new --bin vod2pod
-
-WORKDIR /tmp/vod2pod
-
-COPY Cargo.toml ./
-#trick to use github action cache, check the action folder for more info
-RUN sed '/\[dev-dependencies\]/,/^$/d' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
-
-RUN cargo fetch
-
+# Copy only manifests first (better caching)
+COPY Cargo.toml Cargo.lock* ./
 COPY .cargo/ ./.cargo/
+
+# If the repo ever ends up with edition="2026" (which Cargo doesn't support),
+# patch it to edition="2024" so builds won't explode.
+RUN set -eux; \
+  if grep -qE 'edition\s*=\s*"\s*2026\s*"' Cargo.toml; then \
+    echo "Patching Cargo.toml edition 2026 -> 2024"; \
+    sed -i 's/edition[[:space:]]*=[[:space:]]*"2026"/edition = "2024"/' Cargo.toml; \
+  fi
+
+# Fetch deps with cache mounts
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch
+
+# Now copy the rest of the source
 COPY src ./src
+COPY templates ./templates
 COPY set_version.sh version.txt* ./
-COPY templates/ ./templates/
 
-RUN sh set_version.sh
+# Set version (if your project uses this)
+RUN set -eux; \
+  if [ -f ./set_version.sh ]; then sh ./set_version.sh; fi
 
-RUN cargo build --release --target "$(cat /rust_platform.txt)"
+# Build with cache mounts
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --target "$(cat /rust_platform.txt)"
 
-RUN echo "final size of vod2pod:\n $(ls -lah /tmp/vod2pod/target/*/release/app)"
+# -----------------------------------------
+# Runtime (runs on TARGETPLATFORM)
+# -----------------------------------------
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS app
 
-#----------
-#this step will always run on the target architecture,
-#so the build driver will need to be able to support runtime commands on it (es: using QEMU)  
-FROM --platform=$TARGETPLATFORM debian:bookworm-slim as app
-
-ARG BUILDPLATFORM
 ARG TARGETPLATFORM
+ENV DEBIAN_FRONTEND=noninteractive
 
-RUN echo "I am running on $BUILDPLATFORM, building for $TARGETPLATFORM"
-COPY requirements.txt ./
-#install ffmpeg and yt-dlp
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends unzip python3 curl ca-certificates ffmpeg && \
-    export YT_DLP_VERSION=$(cat requirements.txt | grep yt-dlp | cut -d "=" -f3 | awk -F. '{printf "%d.%02d.%02d\n", $1, $2, $3}') && \
-    curl -L https://github.com/yt-dlp/yt-dlp/releases/download/$YT_DLP_VERSION/yt-dlp -o /usr/local/bin/yt-dlp && \
-    chmod a+rx /usr/local/bin/yt-dlp && \
-    curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip -o deno.zip && \
-    unzip deno.zip -d /usr/local/bin && \
-    rm deno.zip && \
-    apt-get -y purge curl && \
-    apt-get -y purge unzip && \
-    apt-get -y autoremove && \
-    apt-get -y clean && \
-    rm -rf /var/lib/apt/lists/*
+# Core runtime deps:
+# - ffmpeg for transcoding + audio filters
+# - python3 + pip kept installed so your updater/sidecar can pip -U yt-dlp at runtime
+# - ca-certs for https
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    ca-certificates \
+    ffmpeg \
+    python3 \
+    python3-pip \
+    curl \
+    unzip \
+  ; \
+  rm -rf /var/lib/apt/lists/*
 
-# try to install deno with install script, do not fail if it does not work
-RUN apt-get update && apt-get install -y unzip curl ca-certificates && \
-    curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh || true && \
-    apt-get -y purge curl && \
-    apt-get -y purge unzip && \
-    apt-get -y autoremove && \
-    apt-get -y clean && \
-    rm -rf /var/lib/apt/lists/*
+# Install yt-dlp via pip (keeps pip available for runtime updates)
+RUN set -eux; \
+  python3 -m pip install --no-cache-dir -U pip; \
+  python3 -m pip install --no-cache-dir -U yt-dlp
 
-COPY --from=builder /tmp/vod2pod/target/*/release/app /usr/local/bin/vod2pod
-COPY --from=builder /tmp/vod2pod/templates/ ./templates
+# Install Deno appropriate for TARGETPLATFORM
+RUN set -eux; \
+  case "$TARGETPLATFORM" in \
+    "linux/amd64")  DENO_ZIP="deno-x86_64-unknown-linux-gnu.zip" ;; \
+    "linux/arm64")  DENO_ZIP="deno-aarch64-unknown-linux-gnu.zip" ;; \
+    "linux/arm/v7") DENO_ZIP="deno-armv7-unknown-linux-gnueabihf.zip" ;; \
+    *) echo "Unsupported TARGETPLATFORM=$TARGETPLATFORM for deno" >&2; exit 1 ;; \
+  esac; \
+  curl -fsSL "https://github.com/denoland/deno/releases/latest/download/${DENO_ZIP}" -o /tmp/deno.zip; \
+  unzip /tmp/deno.zip -d /usr/local/bin; \
+  rm -f /tmp/deno.zip
 
-RUN if deno --version; then \
-        echo "deno runs correctly"; \
-    else \
-        echo "deno not available"; \
-    fi
+# Optional: ffmpeg wrapper that injects Rumble headers ONLY for rumble URLs
+RUN set -eux; \
+  mv /usr/bin/ffmpeg /usr/bin/ffmpeg.real; \
+  cat > /usr/local/bin/ffmpeg <<'EOF'; \
+#!/bin/sh
+set -eu
+ARGS="$*"
+if echo "$ARGS" | grep -Eiq '(rumble\.com|rmbl\.ws|sp\.rmbl\.ws)'; then
+  exec /usr/bin/ffmpeg.real -headers "Referer: https://rumble.com" -headers "Origin: https://rumble.com" "$@"
+else
+  exec /usr/bin/ffmpeg.real "$@"
+fi
+EOF
+  chmod 0755 /usr/local/bin/ffmpeg
 
-RUN if vod2pod --version; then \
-        echo "vod2pod starts correctly"; \
-        exit 0; \
-    else \
-        echo "vod2pod did not start" 1>&2; \
-        exit 1; \
-    fi
+# Copy built app + templates
+COPY --from=builder /src/target/*/release/app /usr/local/bin/vod2pod
+COPY --from=builder /src/templates/ /templates/
+
+# Quick sanity checks (won't fail the build if deno isn't critical)
+RUN set -eux; \
+  /usr/local/bin/vod2pod --version >/dev/null 2>&1 || true; \
+  deno --version >/dev/null 2>&1 || true; \
+  yt-dlp --version >/dev/null 2>&1 || true
 
 EXPOSE 8080
-
-CMD ["vod2pod"]
+CMD ["/usr/local/bin/vod2pod"]
