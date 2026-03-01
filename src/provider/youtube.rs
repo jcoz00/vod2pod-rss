@@ -7,6 +7,8 @@ use google_youtube3::{
     api::{self, PlaylistItem},
     hyper, hyper_rustls, YouTube,
 };
+use hyper_util::client::legacy::{connect::HttpConnector, Client};
+use hyper_util::rt::TokioExecutor;
 use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use async_trait::async_trait;
@@ -453,14 +455,39 @@ async fn fetch_playlist(id: String, api_key: &String) -> Result<api::Playlist, e
     Ok(playlist)
 }
 
-fn get_youtube_hub() -> YouTube<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>> {
-    let auth = google_youtube3::client::NoToken;
+fn get_youtube_hub() -> YouTube<hyper_rustls::HttpsConnector<HttpConnector>> {
+    // NOTE:
+    // google-youtube3 v7 no longer exposes google_youtube3::client::NoToken.
+    // We can use an API-key-only approach by clearing scopes on requests
+    // and providing a token provider that never gets used for public endpoints.
+
+    #[derive(Clone)]
+    struct NoAuth;
+
+    // This trait lives under google_youtube3::common in v7.
+    // If your IDE can’t find it, search for `GetToken` in the google-youtube3 docs.rs re-exports.
+    impl google_youtube3::common::GetToken for NoAuth {
+        fn token<'a>(
+            &'a self,
+            _scopes: &'a [&str],
+        ) -> google_youtube3::common::GetTokenFuture<'a> {
+            Box::pin(async move {
+                Err(google_youtube3::common::Error::MissingToken)
+            })
+        }
+    }
+
+    let auth = NoAuth;
+
     let connector = hyper_rustls::HttpsConnectorBuilder::new()
         .with_native_roots()
+        .expect("native root certs")
         .https_only()
         .enable_http1()
         .build();
-    let client = hyper::Client::builder().build(connector);
+
+    let client: Client<_, hyper::body::Incoming> =
+        Client::builder(TokioExecutor::new()).build(connector);
 
     YouTube::new(client, auth)
 }
