@@ -1,6 +1,6 @@
 [package]
 authors = ["jcoz00"]
-edition = "2026"
+edition = "2024"
 name = "vod2pod-rss"
 version = "1.2.5"
 rust-version = "1.93"
