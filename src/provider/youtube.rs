@@ -7,6 +7,7 @@ use google_youtube3::{
     api::{self, PlaylistItem},
     hyper, hyper_rustls, YouTube,
 };
+use google_youtube3::common::DummyToken;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use std::{collections::HashMap, str::FromStr, time::Duration};
@@ -240,6 +241,7 @@ async fn fetch_channel(id: String, api_key: &str) -> eyre::Result<api::Channel> 
     let channel_request = hub
         .channels()
         .list(&vec!["snippet".into(), "contentDetails".into()])
+        .clear_scopes()
         .max_results(1)
         .add_id(&id)
         .param("key", api_key);
@@ -269,17 +271,22 @@ async fn create_duration_url_map(
     });
 
     let hub = get_youtube_hub();
-    let videos_requests = ids_batches.map(|batch| {
-        let mut video_info_request = hub
-            .videos()
-            .list(&vec!["contentDetails".to_owned()])
-            .param("key", api_key);
 
-        for video_id in batch {
-            video_info_request = video_info_request.add_id(&video_id);
-        }
-        return video_info_request.doit();
-    });
+    let videos_requests: Vec<_> = ids_batches
+        .map(|batch| {
+            let mut req = hub
+                .videos()
+                .list(&vec!["contentDetails".to_owned()])
+                .clear_scopes()
+                .param("key", api_key);
+
+            for video_id in batch {
+                req = req.add_id(&video_id);
+            }
+
+            req.doit()
+        })
+        .collect();
 
     info!(
         "fetching video info for {} videos in {} batches",
@@ -290,22 +297,14 @@ async fn create_duration_url_map(
     let video_infos = futures::future::join_all(videos_requests)
         .await
         .into_iter()
-        .flatten()
-        .map(|r| {
-            r.0.status()
-                .is_success()
-                .then(|| r.1.items.unwrap())
-                .ok_or_else(|| eyre!("error fetching video info {:?}", r.0))
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
+        .filter_map(Result::ok)
+        .flat_map(|(_, resp)| resp.items.unwrap_or_default())
         .filter_map(|v| {
             Some((
                 v.id?,
                 VideoExtraInfo {
                     duration: iso8601_duration::Duration::parse(&v.content_details?.duration?)
-                        .unwrap(),
+                        .ok()?,
                 },
             ))
         })
@@ -376,10 +375,10 @@ async fn fetch_playlist_items(
         } else {
             remaining_items
         };
-
         let mut playlist_items_request = hub
             .playlist_items()
             .list(&vec!["snippet".into()])
+            .clear_scopes()
             .playlist_id(playlist_id)
             .param("key", api_key)
             .max_results(items_to_fetch.try_into()?);
@@ -442,6 +441,7 @@ async fn fetch_playlist(id: String, api_key: &String) -> Result<api::Playlist, e
     let playlist_request = hub
         .playlists()
         .list(&vec!["snippet".into()])
+        .clear_scopes()
         .add_id(&id)
         .param("key", api_key);
     let result = playlist_request.doit().await?;
@@ -456,28 +456,8 @@ async fn fetch_playlist(id: String, api_key: &String) -> Result<api::Playlist, e
 }
 
 fn get_youtube_hub() -> YouTube<hyper_rustls::HttpsConnector<HttpConnector>> {
-    // NOTE:
-    // google-youtube3 v7 no longer exposes google_youtube3::client::NoToken.
-    // We can use an API-key-only approach by clearing scopes on requests
-    // and providing a token provider that never gets used for public endpoints.
-
-    #[derive(Clone)]
-    struct NoAuth;
-
-    // This trait lives under google_youtube3::common in v7.
-    // If your IDE can’t find it, search for `GetToken` in the google-youtube3 docs.rs re-exports.
-    impl google_youtube3::common::GetToken for NoAuth {
-        fn token<'a>(
-            &'a self,
-            _scopes: &'a [&str],
-        ) -> google_youtube3::common::GetTokenFuture<'a> {
-            Box::pin(async move {
-                Err(google_youtube3::common::Error::MissingToken)
-            })
-        }
-    }
-
-    let auth = NoAuth;
+    // API-key only; disable OAuth scopes on requests via `.clear_scopes()`
+    let auth = DummyToken;
 
     let connector = hyper_rustls::HttpsConnectorBuilder::new()
         .with_native_roots()
@@ -508,7 +488,7 @@ async fn get_youtube_stream_url(url: &Url) -> eyre::Result<Url> {
     debug!("getting stream_url for yt video: {}", url);
     let extra_args: Vec<String> =
         serde_json::from_str(conf().get(ConfName::YoutubeYtDlpExtraArgs)?.as_str()).map_err(|_| eyre!(r#"failed to parse YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS allowed syntax is ["arg1#", "arg2", "arg3", ...]"#))?;
-    let mut command = tokio::process::Command::new("yt-dlp");
+    let mut command = Command::new("yt-dlp");
     command
         .arg("-f")
         .arg("bestaudio")
@@ -612,7 +592,7 @@ async fn find_yt_channel_url_with_c_id(url: &Url) -> eyre::Result<Url> {
             return Err(eyre::eyre!(e));
         }
     };
-    Ok(Url::parse(feed_url)?)
+    Ok(Url::parse(feed_url.trim())?)
 }
 
 fn convert_atom_to_rss(feed: Feed, duration_map: HashMap<String, Option<usize>>) -> String {
@@ -732,7 +712,6 @@ fn parse_duration(duration_str: &str) -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_log::test;
 
     #[tokio::test]
     async fn test_build_items_for_playlist_requires_api_key() {
