@@ -25,8 +25,6 @@ pub struct FfmpegParameters {
     pub seek_time: f32,
     pub url: Url,
     pub audio_codec: AudioCodec,
-    /// Optional FFmpeg audio filter chain (e.g. dynaudnorm, alimiter, loudnorm, etc.)
-    pub audio_filter: Option<String>,
     pub bitrate_kbit: usize,
     pub max_rate_kbit: usize,
     pub expected_bytes_count: usize,
@@ -76,16 +74,6 @@ impl Transcoder {
                 "-acodec",
                 ffmpeg_paramenters.audio_codec.get_ffmpeg_codec_str(),
             ])
-            .args(if let Some(filter) = &ffmpeg_paramenters.audio_filter {
-                let filter = filter.trim();
-                if filter.is_empty() {
-                    Vec::<&str>::new()
-                } else {
-                    vec!["-af", filter]
-                }
-            } else {
-                Vec::<&str>::new()
-            })
             .args([
                 "-ab",
                 format!("{}k", ffmpeg_paramenters.bitrate_kbit).as_str(),
@@ -283,7 +271,6 @@ mod test {
             url: stream_url,
             max_rate_kbit: 64,
             audio_codec: AudioCodec::MP3,
-            audio_filter: None,
             bitrate_kbit: 3,
             expected_bytes_count: 999,
             timeout_in_seconds: 600,

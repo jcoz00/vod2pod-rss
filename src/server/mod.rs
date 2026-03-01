@@ -39,15 +39,7 @@ pub fn spawn_server(listener: TcpListener) -> eyre::Result<Server> {
                             .to(transcode_to_mp3),
                     )
                     .route("transcodize_rss", web::get().to(transcodize_rss))
-                    .route("rss", web::get().to(transcodize_rss))
-                    .route("feeds", web::get().to(transcodize_rss))
                     .route("transcodize_rss", web::head().to(transcodize_rss))
-                    .route("rss", web::head().to(transcodize_rss))
-                    .route("feeds", web::head().to(transcodize_rss))
-                    .route("podcast_chapters", web::get().to(podcast_chapters))
-                    .route("podcast_chapters", web::head().to(podcast_chapters))
-                    .route("podcast_transcript", web::get().to(podcast_transcript))
-                    .route("podcast_transcript", web::head().to(podcast_transcript))
                     .route("health", web::get().to(health))
                     .route("/", web::get().to(index))
                     .route("", web::get().to(index)),
@@ -289,16 +281,10 @@ async fn transcode_to_mp3(req: HttpRequest, query: web::Query<TranscodizeQuery>)
     debug!("choosen timeout in seconds: {timeout_in_seconds}");
 
     let codec = conf().get(ConfName::AudioCodec).unwrap().into();
-    let audio_filter = conf()
-        .get(ConfName::FfmpegAudioFilter)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
     let ffmpeg_paramenters = FfmpegParameters {
         seek_time: seek_secs,
         url: stream_url.clone(),
         audio_codec: codec,
-        audio_filter,
         bitrate_kbit: bitrate,
         max_rate_kbit: bitrate * 30,
         expected_bytes_count: expected_bytes,
@@ -377,40 +363,3 @@ mod tests {
         assert_eq!((start, end, expected), (0, 199, 200));
     }
 }
-
-
-    async fn podcast_chapters() -> HttpResponse {
-        let enabled = conf()
-            .get(ConfName::PodcastChaptersEnabled)
-            .unwrap_or_else(|| "false".to_string())
-            .parse::<bool>()
-            .unwrap_or(false);
-        if !enabled {
-            return HttpResponse::NotFound().finish();
-        }
-
-        // Podcasting 2.0 chapters JSON (minimal empty). Clients tolerate empty chapters.
-        HttpResponse::Ok()
-            .content_type("application/json; charset=utf-8")
-            .body(r#"{"version":"1.2.0","chapters":[]}"#)
-    }
-
-    async fn podcast_transcript() -> HttpResponse {
-        let enabled = conf()
-            .get(ConfName::PodcastTranscriptsEnabled)
-            .unwrap_or_else(|| "false".to_string())
-            .parse::<bool>()
-            .unwrap_or(false);
-        if !enabled {
-            return HttpResponse::NotFound().finish();
-        }
-
-        // WebVTT transcript (minimal empty). If you later add real transcripts,
-        // serve them here.
-        HttpResponse::Ok()
-            .content_type("text/vtt; charset=utf-8")
-            .body("WEBVTT
-
-")
-    }
-

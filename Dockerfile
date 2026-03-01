@@ -1,7 +1,9 @@
 # by using --platform=$BUILDPLATFORM we force the build step 
 # to always run on the native architecture of the build machine
 # making the build time shorter
-FROM --platform=$BUILDPLATFORM rust:1.85 as builder
+# Actix-web 4.12+ / actix-http 3.12+ require Rust 1.88+.
+# Using a current stable toolchain avoids MSRV/"edition2024" issues when Cargo resolves deps.
+FROM --platform=$BUILDPLATFORM rust:1.93 as builder
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
