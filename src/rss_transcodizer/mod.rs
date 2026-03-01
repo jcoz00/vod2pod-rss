@@ -5,6 +5,7 @@ use eyre::eyre;
 use log::debug;
 use reqwest::Url;
 use rss::extension::itunes::ITunesCategory;
+use rss::extension::{Extension, ExtensionMap};
 use rss::Channel;
 use rss::{Enclosure, Item};
 
@@ -35,19 +36,32 @@ pub fn inject_vod2pod_customizations(
         "http://purl.org/rss/1.0/modules/content/".to_string(),
     );
     injected_feed.set_namespaces(namespaces);
-    injected_feed.set_language("en-US".to_string());
+        let language = conf()
+        .get(ConfName::PodcastLanguage)
+        .unwrap_or_else(|| "en".to_string());
+    injected_feed.set_language(language);
+
+    if let Some(desc) = injected_feed.description().map(|d| d.to_string()) {
+        injected_feed.set_description(Some(wrap_cdata(desc)));
+    }
     injected_feed
         .items_mut()
         .iter_mut()
         .try_for_each(|item| -> eyre::Result<_> {
-            let description = get_description(item);
+            let description = wrap_cdata(get_description(item));
             item.set_description(description);
             let bitrate: u64 = conf()
                 .get(ConfName::Mp3Bitrate)
                 .unwrap()
                 .parse()
                 .expect("MP3_BITRATE must be a number");
-            let generation_uuid = uuid::Uuid::new_v4().to_string();
+                        // Apple: GUID must be stable and never change. Prefer existing GUID, else fall back to link.
+            if item.guid().is_none() {
+                if let Some(link) = item.link() {
+                    item.set_guid(Some(rss::Guid { value: link.to_string(), permalink: Some(false) }));
+                }
+            }
+
             let codec: AudioCodec = conf().get(ConfName::AudioCodec).unwrap().into();
             let ext = format!(".{}", codec.get_extension_str());
             if let Some(mut transcode_service_url) = transcode_service_url.clone() {
@@ -61,13 +75,14 @@ pub fn inject_vod2pod_customizations(
                 transcode_service_url
                     .query_pairs_mut()
                     .append_pair("bitrate", bitrate.to_string().as_str())
-                    .append_pair("uuid", generation_uuid.as_str())
+                    .append_pair("uuid", uuid::Uuid::new_v4().to_string().as_str())
                     .append_pair("duration", duration_secs.to_string().as_str())
                     .append_pair("url", item.link().ok_or(eyre!("not url found in item"))?)
                     .append_pair("ext", ext.as_str()); //this should allways be last, some players refuse to play urls not ending in .mp3
 
                 let enclosure = Enclosure {
-                    length: (bitrate * 1024 * duration_secs).to_string(),
+                                        // Apple expects bytes. We approximate from bitrate (kbps) and duration.
+                    length: ((bitrate * 1000 / 8) * duration_secs).to_string(),
                     url: transcode_service_url.to_string(),
                     mime_type: "audio/mpeg".to_string(),
                 };
@@ -77,7 +92,71 @@ pub fn inject_vod2pod_customizations(
                     enclosure.length, enclosure.url, enclosure.mime_type
                 );
                 item.set_enclosure(Some(enclosure));
-            }
+
+// Optional Podcasting 2.0 extensions (chapters / transcripts)
+// Enabled via env vars, and exposed via local endpoints.
+// Apple Podcasts supports <podcast:chapters> and <podcast:transcript>.
+let chapters_enabled = conf()
+                    .get(ConfName::PodcastChaptersEnabled)
+                    .unwrap_or_else(|| "false".to_string())
+                    .parse::<bool>()
+                    .unwrap_or(false);
+let transcripts_enabled = conf()
+                    .get(ConfName::PodcastTranscriptsEnabled)
+                    .unwrap_or_else(|| "false".to_string())
+                    .parse::<bool>()
+                    .unwrap_or(false);
+
+if (chapters_enabled || transcripts_enabled) && item.link().is_some() {
+    let base = base_url_from(&transcode_service_url)?;
+    let mut ext_map: ExtensionMap = item.extensions().cloned().unwrap_or_default();
+    let mut podcast_ext = ext_map.remove("podcast").unwrap_or_default();
+
+    if chapters_enabled {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert(
+            "url".to_string(),
+            build_endpoint_url(&base, "/podcast_chapters", item.link().unwrap())
+                .to_string(),
+        );
+        podcast_ext.insert(
+            "chapters".to_string(),
+            vec![Extension {
+                name: "chapters".to_string(),
+                value: None,
+                attrs,
+                children: std::collections::BTreeMap::new(),
+            }],
+        );
+    }
+
+    if transcripts_enabled {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert(
+            "url".to_string(),
+            build_endpoint_url(&base, "/podcast_transcript", item.link().unwrap())
+                .to_string(),
+        );
+        attrs.insert("type".to_string(), "text/vtt".to_string());
+        attrs.insert("rel".to_string(), "captions".to_string());
+        podcast_ext.insert(
+            "transcript".to_string(),
+            vec![Extension {
+                name: "transcript".to_string(),
+                value: None,
+                attrs,
+                children: std::collections::BTreeMap::new(),
+            }],
+        );
+    }
+
+    if !podcast_ext.is_empty() {
+        ext_map.insert("podcast".to_string(), podcast_ext);
+        item.set_extensions(ext_map);
+    }
+}
+
+
             Ok(())
         })?;
 
@@ -128,3 +207,24 @@ fn parse_duration(duration_str: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(duration_secs))
 }
 
+fn wrap_cdata(s: String) -> String {
+    if s.contains("<![CDATA[") {
+        return s;
+    }
+    format!("<![CDATA[{}]]>", s)
+}
+
+fn base_url_from(url: &Url) -> eyre::Result<Url> {
+    let mut base = url.clone();
+    base.set_path("/");
+    base.set_query(None);
+    base.set_fragment(None);
+    Ok(base)
+}
+
+fn build_endpoint_url(base: &Url, path: &str, media_url: &str) -> Url {
+    let mut u = base.clone();
+    u.set_path(path);
+    u.query_pairs_mut().append_pair("url", media_url);
+    u
+}

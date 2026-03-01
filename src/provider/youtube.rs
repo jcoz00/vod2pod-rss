@@ -15,7 +15,7 @@ use log::{debug, info, warn};
 use regex::Regex;
 use reqwest::Url;
 use rss::{
-    extension::itunes::{ITunesChannelExtensionBuilder, ITunesItemExtensionBuilder},
+    extension::itunes::{ITunesCategory, ITunesChannelExtensionBuilder, ITunesImage, ITunesItemExtensionBuilder, ITunesOwner},
     Channel, ChannelBuilder, GuidBuilder, ImageBuilder, Item, ItemBuilder,
 };
 use tokio::process::Command;
@@ -166,7 +166,8 @@ async fn fetch_from_api(id: IdType, api_key: String) -> eyre::Result<(Channel, V
 
             let duration_map = create_duration_url_map(&items, &api_key).await?;
 
-            let rss_items = build_channel_items_from_playlist(items, duration_map);
+            let min_seconds = get_youtube_min_seconds(&configs);
+            let rss_items = build_channel_items_from_playlist(items, duration_map, min_seconds);
 
             Ok((rss_channel, rss_items))
         }
@@ -191,7 +192,8 @@ async fn fetch_from_api(id: IdType, api_key: String) -> eyre::Result<(Channel, V
 
             let duration_map = create_duration_url_map(&items, &api_key).await?;
 
-            let rss_items = build_channel_items_from_playlist(items, duration_map);
+            let min_seconds = get_youtube_min_seconds(&configs);
+            let rss_items = build_channel_items_from_playlist(items, duration_map, min_seconds);
 
             Ok((rss_channel, rss_items))
         }
@@ -212,18 +214,66 @@ macro_rules! get_thumb {
 }
 
 fn build_channel_from_yt_channel(channel: api::Channel) -> Channel {
+    let conf = conf();
     let mut channel_builder = ChannelBuilder::default();
     let mut itunes_channel_builder = ITunesChannelExtensionBuilder::default();
 
     if let Some(mut snippet) = channel.snippet {
-        channel_builder.description(snippet.description.take().unwrap_or("".to_owned()));
-        channel_builder.title(snippet.title.take().unwrap_or("".to_owned()));
-        channel_builder.language(snippet.default_language.take());
+        let title = snippet.title.take().unwrap_or_default();
+        let description = snippet.description.take().unwrap_or_default();
+
+        // Allow overriding language (BCP-47). Defaults to YouTube's language or "en".
+        let language = conf
+            .get(ConfName::PodcastLanguage)
+            .unwrap_or_else(|_| snippet.default_language.take().unwrap_or_else(|| "en".to_string()));
+
+        channel_builder.title(title.clone());
+        channel_builder.description(description.clone());
+        channel_builder.language(Some(language));
+
+        // iTunes channel fields
+        itunes_channel_builder.author(Some(title.clone()));
+        itunes_channel_builder.summary(Some(description.clone()));
+        itunes_channel_builder.subtitle(Some(description.clone()));
+
         if let Some(mut thumb) = get_thumb!(snippet) {
-            itunes_channel_builder.image(thumb.url.take());
+            itunes_channel_builder.image(Some(ITunesImage { href: thumb.url.take() }));
         }
-        itunes_channel_builder.explicit(Some("no".to_owned()));
+
+        // Owner (recommended by Apple Podcasts)
+        let owner_name = conf.get(ConfName::ItunesOwnerName).unwrap_or_default();
+        let owner_email = conf.get(ConfName::ItunesOwnerEmail).unwrap_or_default();
+        if !owner_name.is_empty() && !owner_email.is_empty() {
+            itunes_channel_builder.owner(Some(ITunesOwner {
+                name: owner_name,
+                email: owner_email,
+            }));
+        }
+
+        // Category (single top-level iTunes category text)
+        let category = conf.get(ConfName::ItunesCategory).unwrap_or_default();
+        if !category.is_empty() {
+            itunes_channel_builder.categories(Some(vec![ITunesCategory {
+                text: category,
+                subcategories: vec![],
+            }]));
+        }
+
+        // Episode type (episodic or serial)
+        let ep_type = conf.get(ConfName::ItunesType).unwrap_or_default();
+        if !ep_type.is_empty() {
+            itunes_channel_builder.episode_type(Some(ep_type));
+        }
+
+        // Explicit can be overridden via ITUNES_EXPLICIT=true/false
+        let explicit = conf.get_bool(ConfName::ItunesExplicit).unwrap_or(false);
+        itunes_channel_builder.explicit(Some(if explicit {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        }));
     }
+
     channel_builder.link(format!(
         "https://www.youtube.com/channel/{}",
         channel.id.unwrap_or_default()
@@ -255,6 +305,44 @@ async fn fetch_channel(id: String, api_key: &str) -> eyre::Result<api::Channel> 
 #[derive(Debug, Clone)]
 struct VideoExtraInfo {
     duration: iso8601_duration::Duration,
+}
+
+fn duration_seconds(d: &iso8601_duration::Duration) -> u64 {
+    // Ignore years/months/weeks (ambiguous). Include days/hours/minutes/seconds.
+    let days = d.day as i64;
+    let hours = d.hour as i64;
+    let minutes = d.minute as i64;
+    let seconds = d.second as i64;
+    let total = days
+        .saturating_mul(86_400)
+        .saturating_add(hours.saturating_mul(3_600))
+        .saturating_add(minutes.saturating_mul(60))
+        .saturating_add(seconds);
+    if total <= 0 { 0 } else { total as u64 }
+}
+
+/// Determine the minimum YouTube video duration (seconds) to include in feeds.
+///
+/// Env vars:
+/// - `YOUTUBE_MIN_SECONDS`: explicit minimum duration (default: 0 = no filter)
+/// - `YOUTUBE_EXCLUDE_SHORTS`: if true and `YOUTUBE_MIN_SECONDS` is 0, uses 61 seconds
+fn get_youtube_min_seconds(configs: &Configs) -> u64 {
+    let min_seconds = configs
+        .get(&ConfName::YoutubeMinSeconds)
+        .unwrap_or_else(|_| "0".to_string())
+        .parse::<u64>()
+        .unwrap_or(0);
+
+    let exclude_shorts = configs
+        .get(&ConfName::YoutubeExcludeShorts)
+        .unwrap_or_else(|_| "false".to_string())
+        .to_lowercase();
+
+    if min_seconds == 0 && (exclude_shorts == "1" || exclude_shorts == "true" || exclude_shorts == "yes") {
+        61
+    } else {
+        min_seconds
+    }
 }
 
 async fn create_duration_url_map(
@@ -315,6 +403,7 @@ async fn create_duration_url_map(
 fn build_channel_items_from_playlist(
     items: Vec<PlaylistItem>,
     videos_infos: HashMap<String, VideoExtraInfo>,
+    min_seconds: u64,
 ) -> Vec<Item> {
     let rss_item: Vec<Item> = items
         .into_iter()
@@ -339,6 +428,11 @@ fn build_channel_items_from_playlist(
                 warn!("no duration found for {:?}", &video_id);
                 None
             })?;
+
+            if min_seconds > 0 && duration_seconds(&video_infos.duration) < min_seconds {
+                // Skip short videos (e.g., Shorts)
+                return None;
+            }
             let itunes_item_extension = ITunesItemExtensionBuilder::default()
                 .summary(Some(description))
                 .duration(Some({
@@ -421,7 +515,7 @@ fn build_channel_from_playlist(playlist: api::Playlist) -> Channel {
     if let Some(mut snippet) = playlist.snippet {
         channel_builder.description(snippet.description.take().unwrap_or("".to_owned()));
         channel_builder.title(snippet.title.take().unwrap_or("".to_owned()));
-        channel_builder.language(snippet.default_language.take());
+        channel_builder.language(Some(language));
         channel_builder.link(format!(
             "https://www.youtube.com/playlist?list={}",
             playlist.id.unwrap_or_default()

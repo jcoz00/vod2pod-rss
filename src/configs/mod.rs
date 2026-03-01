@@ -24,8 +24,40 @@ pub enum ConfName {
     AudioCodec,
     PeerTubeValidHosts,
     YoutubeYtDlpExtraArgs,
+    /// Minimum video duration (in seconds) to include in generated YouTube RSS feeds.
+    /// Useful for excluding YouTube Shorts.
+    YoutubeMinSeconds,
+    /// Convenience flag to exclude YouTube Shorts (defaults to false). If true and
+    /// `YOUTUBE_MIN_SECONDS` is not set (or is 0), a default minimum of 61 seconds is used.
+    YoutubeExcludeShorts,
+    // Apple / Podcast feed metadata
+    PodcastLanguage,
+    ItunesOwnerName,
+    ItunesOwnerEmail,
+    ItunesCategory,
+    ItunesExplicit,
+    ItunesType,
+
+    // Podcasting 2.0 features
+    PodcastChaptersEnabled,
+    PodcastTranscriptsEnabled,
+
+    /// Maximum number of items to include when generating a Rumble RSS feed (defaults to 300).
+    RumbleMaxResults,
+    /// Minimum video duration (in seconds) to include in generated Rumble RSS feeds.
+    /// Useful for excluding short-form clips.
+    RumbleMinSeconds,
+    /// Additional arguments to pass to yt-dlp when enumerating a Rumble channel/playlist.
+    /// Format: JSON array of strings.
+    RumbleYtDlpListExtraArgs,
+    /// Additional arguments to pass to yt-dlp when extracting a direct media URL from a Rumble video.
+    /// Format: JSON array of strings.
+    RumbleYtDlpGetUrlExtraArgs,
     CacheTTL,
     FfmpegTimeoutSeconds,
+    /// Optional FFmpeg audio filter chain applied during transcoding.
+    /// Example: dynaudnorm=f=150:g=12:m=10,alimiter=limit=0.98
+    FfmpegAudioFilter,
 }
 
 struct EnvConf {}
@@ -113,11 +145,41 @@ impl Conf for EnvConf {
                 Ok(std::env::var("YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS")
                     .unwrap_or_else(|_| "[]".to_string()))
             }
+            ConfName::YoutubeMinSeconds => {
+                Ok(std::env::var("YOUTUBE_MIN_SECONDS").unwrap_or_else(|_| "0".to_string()))
+            }
+            ConfName::YoutubeExcludeShorts => {
+                Ok(std::env::var("YOUTUBE_EXCLUDE_SHORTS").unwrap_or_else(|_| "false".to_string()))
+            }
+            ConfName::PodcastLanguage => Ok(std::env::var("PODCAST_LANGUAGE").unwrap_or_else(|_| "en".to_string())),
+            ConfName::ItunesOwnerName => Ok(std::env::var("ITUNES_OWNER_NAME").unwrap_or_default()),
+            ConfName::ItunesOwnerEmail => Ok(std::env::var("ITUNES_OWNER_EMAIL").unwrap_or_default()),
+            ConfName::ItunesCategory => Ok(std::env::var("ITUNES_CATEGORY").unwrap_or_else(|_| "News".to_string())),
+            ConfName::ItunesExplicit => Ok(std::env::var("ITUNES_EXPLICIT").unwrap_or_else(|_| "false".to_string())),
+            ConfName::ItunesType => Ok(std::env::var("ITUNES_TYPE").unwrap_or_else(|_| "episodic".to_string())),
+            ConfName::PodcastChaptersEnabled => Ok(std::env::var("PODCAST_CHAPTERS").unwrap_or_else(|_| "false".to_string())),
+            ConfName::PodcastTranscriptsEnabled => Ok(std::env::var("PODCAST_TRANSCRIPTS").unwrap_or_else(|_| "false".to_string())),
+
+            ConfName::RumbleMaxResults => {
+                Ok(std::env::var("RUMBLE_MAX_RESULTS").unwrap_or_else(|_| "300".to_string()))
+            }
+            ConfName::RumbleMinSeconds => {
+                Ok(std::env::var("RUMBLE_MIN_SECONDS").unwrap_or_else(|_| "0".to_string()))
+            }
+            ConfName::RumbleYtDlpListExtraArgs => {
+                Ok(std::env::var("RUMBLE_YT_DLP_LIST_EXTRA_ARGS").unwrap_or_else(|_| "[]".to_string()))
+            }
+            ConfName::RumbleYtDlpGetUrlExtraArgs => {
+                Ok(std::env::var("RUMBLE_YT_DLP_GET_URL_EXTRA_ARGS").unwrap_or_else(|_| "[]".to_string()))
+            }
             ConfName::CacheTTL => {
                 Ok(std::env::var("CACHE_TTL").unwrap_or_else(|_| "600".to_string()))
             }
             ConfName::FfmpegTimeoutSeconds => {
                 Ok(std::env::var("FFMPEG_TIMEOUT_SECONDS").unwrap_or_else(|_| "300".to_string()))
+            }
+            ConfName::FfmpegAudioFilter => {
+                Ok(std::env::var("FFMPEG_AUDIO_FILTER").unwrap_or_else(|_| "".to_string()))
             }
         }
     }
