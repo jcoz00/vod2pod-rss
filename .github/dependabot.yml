@@ -1,59 +1,39 @@
 version: 2
 updates:
-  # -----------------------
-  # Rust / Cargo (including Cargo.lock)
-  # -----------------------
+  # Rust crates
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "sunday"
-      time: "05:00"
-      timezone: "America/Chicago"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "rust"
+    open-pull-requests-limit: 10
+
+    # Optional: group updates so you don’t get spammed with PRs
     groups:
       rust-dependencies:
         patterns:
           - "*"
-    # Optional: reduce risk of "MSRV surprise" changes by ignoring major bumps
-    # for a few high-churn crates. Uncomment if you want slower change.
-    # ignore:
-    #   - dependency-name: "actix-web"
-    #     update-types: ["version-update:semver-major"]
-    #   - dependency-name: "actix-http"
-    #     update-types: ["version-update:semver-major"]
-    #   - dependency-name: "time"
-    #     update-types: ["version-update:semver-major"]
 
-  # -----------------------
-  # Python / pip
-  # -----------------------
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "sunday"
-      time: "05:10"
-      timezone: "America/Chicago"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "python"
-    groups:
-      python-dependencies:
-        patterns:
-          - "*"
+    # Optional safety: avoid auto major bumps on the HTTP stack
+    ignore:
+      - dependency-name: "actix-web"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "actix-http"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "hyper"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "reqwest"
+        update-types: ["version-update:semver-major"]
 
-  # -----------------------
   # GitHub Actions
-  # -----------------------
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "monthly"
-    labels:
-      - "dependencies"
-      - "ci"
+
+  # Python (only if you actually have requirements.txt / pyproject.toml etc.)
+  # If you don’t, delete this block to avoid noise.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
