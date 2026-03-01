@@ -1,124 +1,155 @@
-# vod2pod-rss [![tests](https://github.com/madiele/vod2pod-rss/actions/workflows/rust.yml/badge.svg)](https://github.com/madiele/vod2pod-rss/actions/workflows/rust.yml) [![stable image](https://github.com/madiele/vod2pod-rss/actions/workflows/docker-image.yml/badge.svg?branch=stable)](https://github.com/madiele/vod2pod-rss/actions/workflows/docker-image.yml) [![beta image](https://github.com/madiele/vod2pod-rss/actions/workflows/docker-image-beta.yml/badge.svg)](https://github.com/madiele/vod2pod-rss/actions/workflows/docker-image-beta.yml)
+# vod2pod-rss (fork)
 
-Converts a YouTube or Twitch channel into a full blown audio podcast feed.
+Convert **YouTube**, **Twitch**, **Rumble**, and existing **RSS/Atom** feeds into a podcast RSS feed (optionally transcoding audio to MP3). Designed for always‑on self‑hosting behind a reverse proxy (Traefik, Nginx, etc.).
 
-<a label="example of it working with podcast addict" href="https://user-images.githubusercontent.com/4585690/231301791-2f838fb3-4f6e-4382-bac4-c968bfe98c08.png"><img src="https://user-images.githubusercontent.com/4585690/231301791-2f838fb3-4f6e-4382-bac4-c968bfe98c08.png" align="right" height="350" ></a>
+## What’s included in this fork
 
-# Features
-- Completely converts the VoDs into a proper podcast RSS that can be listened to directly inside the client.
-- The VoDs are not downloaded on the server, so no need for storage while self-hosting this app.
-- VoDs are transcoded to MP3 192k on the fly by default, tested to be working flawlessly even on a Raspberry Pi 3-4.
-- also works on standard rss podcasts feed if you want to have a lower bitrate version to save mobile data.
+### Providers
+- **YouTube** channels/playlists (via YouTube Data API when configured; falls back to yt-dlp when needed)
+- **Twitch** channels
+- **Rumble** channels (e.g. `https://rumble.com/c/<channel>`) *(new)*
+- **Existing RSS/Atom** feeds (pass-through with optional transcoding)
 
-## Limitations
-- Youtube channel avatar is not present and results are limited to 15 when no YouTube API key is set.
+### Apple Podcasts-friendly RSS
+This fork outputs RSS 2.0 feeds with:
+- iTunes + PodcastIndex namespaces (`itunes:` + `podcast:`)
+- Professional show/episode metadata (title, description, image, author/owner, category, explicit, etc.)
+- Optional **chapters** (`<podcast:chapters>`) and **transcripts** (`<podcast:transcript>`) when enabled *(new)*
 
-# Usage
+### Quality-of-life features
+- **Shorts filtering (YouTube)** via environment variables *(new)*  
+  Exclude Shorts by applying a minimum duration threshold.
+- **Audio processing during transcoding** *(new)*  
+  Optional FFmpeg filter chain for loudness leveling / dynamic normalization.
+- **Rumble compatibility** *(new)*  
+  Rumble feed generation and fetching of audio URLs using yt-dlp; plus optional FFmpeg header injection for Rumble.
+- **Optional yt-dlp auto-update sidecar** *(new)*  
+  Updates yt-dlp during off‑peak window and **skips restart when active streaming is detected**.
 
-## Web UI
-<a label="frontend" href="https://user-images.githubusercontent.com/4585690/234704870-0bf3023a-78e0-4ccc-adea-9d1f6ea2fabc.png"><img src="https://user-images.githubusercontent.com/4585690/234704870-0bf3023a-78e0-4ccc-adea-9d1f6ea2fabc.png" align="right" width="400px" ></a>
-- just go where you hosted vod2pod and you will find an easy to use UI to generate the feed
-## Manually Generate A Podcast URL
-- In a web browser go to where you hosted vod2pod, es: http://myserver.com/ or http://localhost/
-  - In the web page that opens paste the channel you want to convert to podcast and copy the generated link.
-- Optionally goto : http://myserver.com/transcodize_rss?url=channel_url
-  - An RSS will be generated.
-  - Replace `channel_url` with the URL of the YouTube or Twitch channel you want to convert into a podcast.
-    - YouTube: `http://myserver.com/transcodize_rss?url=https://www.youtube.com/c/channelname`
-    - Twitch: `http://myserver.com/transcodize_rss?url=https://www.twitch.tv/channelname`
-    - RSS/atom feed: `http://myserver.com/transcodize_rss?url=https://feeds.simplecast.com/aU_RzZ7j`
-      - Add the domain to the whitelist. See configurations [below](#configurations)
+---
 
-## Add The URL To A Podcast Client
-- find a tutorial on how to add an rss feed to your favorite podcast app
+## Quickstart (Docker Compose)
 
-# Optional API Access
-- Twitch: Get your SECRET and CLIENT ID <https://dev.twitch.tv/console>
-- YouTube: Enable more than 15 items in the RSS feed, channel avatar
-  - API key <https://developers.google.com/youtube/v3/getting-started>
-  - Enable API Access <https://console.cloud.google.com/>
-    - APIs & Services > +Enable APIs and Services > Search "YouTube Data API"
+1) Copy the example compose file and edit env vars:
+- `docker-compose.yml`
+- `.env` (recommended)
 
-See configurations [below](#configurations)
-
-# Install
-## Clone This Repository  
-```
-git clone https://github.com/madiele/vod2pod-rss.git
+2) Run:
+```bash
+docker compose up -d
 ```
 
-## Docker
-- Install [Docker Compose](https://docs.docker.com/compose/install/)
-- Precompiled images are available [here](https://hub.docker.com/r/madiele/vod2pod-rss/) for linux machines with arm64, amd64 and armv7 (raspberry pis are supported).
+### URLs
+- Web UI: `https://<host>/`
+- RSS (cached): `https://<host>/rss?url=<encoded_source_url>`
+- RSS (forced transcode): `https://<host>/transcodize_rss?url=<encoded_source_url>`
+- Media stream (generated in feed): `/podcast/...` and `/transcode_media/...`
 
-### Docker Compose
+Supported source URLs include:
+- YouTube: `https://www.youtube.com/@channel` / `https://www.youtube.com/c/channelname`
+- Twitch: `https://www.twitch.tv/channelname`
+- Rumble: `https://rumble.com/c/channelname`
+- RSS/Atom feed URL
+
+---
+
+## Configuration
+
+### Core
+| Variable | Default | Notes |
+|---|---:|---|
+| `TRANSCODE` | `true` | Set `false` to disable transcoding (feeds only). |
+| `MP3_BITRATE` | `192` | Bitrate for MP3 output when transcoding. |
+| `SUBFOLDER` | `/` | Root path when behind a reverse proxy. |
+| `VALID_URL_DOMAINS` | (built-in) | Comma-separated allowlist for input URLs. |
+| `ALLOWED_MEDIA_HOSTS` | (built-in) | Comma-separated allowlist for media hostnames (enclosure URLs). |
+| `CACHE_TTL` | `600` | Cache TTL for generated feeds (seconds). |
+
+### YouTube
+| Variable | Default | Notes |
+|---|---:|---|
+| `YT_API_KEY` | *(empty)* | Enables higher result limits + richer metadata. |
+| `YOUTUBE_MAX_RESULTS` | `15` | Max items to fetch (higher with API key). |
+| `YOUTUBE_MIN_SECONDS` | `0` | Minimum duration in seconds (filters short videos). |
+| `YOUTUBE_EXCLUDE_SHORTS` | `false` | If `true`, forces `YOUTUBE_MIN_SECONDS` to at least **61s** (unless you set a higher min). |
+| `YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS` | `[]` | JSON array of extra args passed to yt-dlp when extracting YouTube audio URLs. |
+
+**Tip (exclude Shorts):**
+- Set `YOUTUBE_EXCLUDE_SHORTS=true` (easy mode), or
+- Set `YOUTUBE_MIN_SECONDS=180` (or any threshold you prefer).
+
+> Note: yt-dlp’s `--match-filter` does *not* reliably remove Shorts from the **feed list** because the feed list is built from the YouTube API/video metadata. Filtering needs to happen at the feed-generation layer (this fork does that with `YOUTUBE_MIN_SECONDS`/`YOUTUBE_EXCLUDE_SHORTS`).
+
+### Rumble
+| Variable | Default | Notes |
+|---|---:|---|
+| `RUMBLE_MAX_RESULTS` | `25` | Max items per Rumble channel. |
+| `RUMBLE_MIN_SECONDS` | `0` | Minimum duration in seconds (filters short items). |
+| `RUMBLE_YT_DLP_GET_URL_EXTRA_ARGS` | `[]` | JSON array of extra args passed to yt-dlp when extracting Rumble audio URLs. |
+
+### Audio processing (FFmpeg)
+When `TRANSCODE=true`, you can apply a filter chain:
+| Variable | Default | Notes |
+|---|---:|---|
+| `FFMPEG_AUDIO_FILTER` | *(empty)* | FFmpeg `-af` filter string (applied during transcode). |
+
+Example (gentle leveling for spoken content):
+```bash
+FFMPEG_AUDIO_FILTER=dynaudnorm=f=150:g=12:m=10,alimiter=limit=0.98
 ```
-cd vod2pod-rss
-nano docker-compose.yml
+
+### Apple Podcasts / RSS metadata
+These populate `<channel>` and `<item>` tags using Apple’s RSS expectations.
+
+| Variable | Notes |
+|---|---|
+| `PODCAST_TITLE` | Show title (`<title>` / `<itunes:title>`). |
+| `PODCAST_DESCRIPTION` | Show description (`<description>` / `<itunes:summary>`). |
+| `PODCAST_IMAGE_URL` | Artwork URL (`<itunes:image href="...">`). |
+| `PODCAST_LANGUAGE` | ISO 639 language code (`en`, `en-us`, etc.). |
+| `PODCAST_CATEGORY` | Apple category string (e.g. `Society &amp; Culture`). |
+| `PODCAST_AUTHOR` | `<itunes:author>`. |
+| `PODCAST_OWNER_NAME` / `PODCAST_OWNER_EMAIL` | `<itunes:owner>`. |
+| `PODCAST_EXPLICIT` | `true`/`false` (`<itunes:explicit>`). |
+| `PODCAST_TYPE` | `episodic` (default) or `serial`. |
+| `PODCAST_WEBSITE` | `<link>` for the show. |
+| `PODCAST_COPYRIGHT` | `<copyright>`. |
+| `PODCAST_GENERATOR` | `<generator>`. |
+
+### Chapters + transcripts (optional)
+| Variable | Default | Notes |
+|---|---:|---|
+| `PODCAST_CHAPTERS` | `false` | If `true`, emits `<podcast:chapters>` links when chapter data is available. |
+| `PODCAST_TRANSCRIPTS` | `false` | If `true`, emits `<podcast:transcript>` links when transcript data is available. |
+
+---
+
+## yt-dlp PO Token provider (YouTube 403 mitigation)
+If you’re using a PO token provider (bgutil), pass yt-dlp extractor args (example):
+```yaml
+YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS: >-
+  ["--extractor-args","youtube:po_token_provider=bgutil:http;base_url=http://127.0.0.1:4416;player_client=android_vr,web,mweb"]
 ```
-See configurations [below](#configurations)
-```
-sudo docker compose up -d
-```
+Run the provider in the same network namespace as the main container or ensure `base_url` is reachable from within `vod2pod`.
 
-#### Updating
-```
-sudo docker compose pull && sudo docker compose up -d
-sudo docker system prune
-```
-- To get notifications of new release follow [these instructions](https://docs.github.com/en/account-and-profile/managing-subscriptions-and-notifications-on-github/setting-up-notifications/about-notifications)
+---
 
-#### Switching to the Beta branch
+## yt-dlp auto-update (recommended: sidecar)
+This fork includes a helper script and a compose service that:
+- Runs a daily check (e.g. noon) to see if yt-dlp updates
+- Schedules restart in a maintenance window (e.g. 04:10–05:30)
+- Skips restart if a stream was active recently (guard window)
 
-The beta branch is a version of vod2pod that is always updated to the latest yt-dlp releases in a matter of days, if you have problems try it out first to see if they are fixed, then open an issue so that I can consider making a new stable release
+See `docker-compose.yml` and `scripts/yt-dlp-updater.sh` for the reference implementation and knobs.
 
-Also by being on the beta branch you might help me find bugs before I make any new stable release, so you'll help the project too
+---
 
-To switch open the compose docker-compose.yml and edit the vod2pod image section from "latest" to "beta", then follow the steps to update
+## Notes / limitations
+- Apple Podcasts will display up to 2,000 valid episodes from a feed.
+- Chapters and transcripts require upstream metadata availability (or future enhancement to generate them).
+- Rumble support depends on yt-dlp extraction and may require additional headers/args for some content.
 
-## Configurations
-### Web Server Port
-- `ports`: "80:8080" (optional) Change 80 to another port if you already use the port 80 on your host
-  - e.g. "81:8080" http://myserver.com:81/
+---
 
-### Optional API Keys
-- `YT_API_KEY`: Set your YouTube API key (works without but the feed is limited to 15)
-  - e.g. YT_API_KEY=AIzaSyBTCCEOHm
-- `TWITCH_SECRET`: Set your Twitch secret
-- `TWITCH_CLIENT_ID`: Set your Twitch client ID
-
-Note: These can also be set using Docker [.env files](https://docs.docker.com/compose/environment-variables/env-file/) 
-
-### Advanced YouTube Configuration
-- `YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS`: Additional arguments to pass to yt-dlp when extracting YouTube audio URLs
-  - This variable allows you to pass custom arguments to yt-dlp for advanced configurations
-  - Format: JSON array of strings, e.g. `["--arg1", "value1", "--arg2", "value2"]`
-  - Useful for scenarios like:
-    - **Using a proxy**: `YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS=["--proxy", "http://proxy.example.com:8080"]`
-    - **Custom user-agent**: `YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS=["--user-agent", "Mozilla/5.0 Custom Agent"]`
-  - Note: These arguments are applied in addition to the default yt-dlp arguments used by vod2pod-rss
-  - Default: `[]` (empty array)
-
-### Environment
-- `TRANSCODE`: Set to "false" to disable transcoding, usefull if you only need the feeds (default: "true")
-- `MP3_BITRATE`: Set the bitrate of the trascoded stream to your client (default: "192")
-- `SUBFOLDER`: Set the the root path of the app, useful for reverse proxies (default: "/")
-- `VALID_URL_DOMAINS`: (optional) Set a comma separated list of domain urls that are allowed to be converted into RSS  (defaults to YouTube and Twitch urls)
-- `CACHE_TTL`: (optional) Set the time to live of the cache in seconds, default is 600 seconds (10 minutes)
-- `YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS`
-
-# Honorable Mentions
-
-These projects were fundamental for the success of vod2pod-rss, originally they handled the feed generation for youtube and twitch, now this is all done by vod2pod-rss internally so they are not used anymore, but were still helpful to get vod2pod-rss up and running fast.
-* Youtube support was possible thanks to the cool [podtube fork project by amckee](https://github.com/amckee/PodTube) consider dropping him a star.
-* Twitch support was possible thanks to [my fork](https://github.com/madiele/TwitchToPodcastRSS) of [lzeke0's TwitchRSS](https://github.com/lzeke0/TwitchRSS) drop a star to him too!
-
-## Donations
-
-This is a passion project, and mostly made for personal use, but if you want to gift a pizza margherita, feel free!
-
-[!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/madiele)
-
-## Contributing
-
-check the [CONTRIBUTING.md](CONTRIBUTING.md) to find a tutorial on how to setup your enviroment for develpment
+## License
+Upstream is MIT; this fork remains MIT.
