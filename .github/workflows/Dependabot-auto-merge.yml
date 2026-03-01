@@ -3,24 +3,28 @@ name: Dependabot auto-merge
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  automerge:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
-    if: >
-      github.actor == 'dependabot[bot]' &&
-      github.event.pull_request.draft == false
+
     steps:
-      - name: Enable auto-merge
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only auto-merge patch/minor by default (safer for Rust)
+      - name: Enable auto-merge (patch/minor only)
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
         run: |
-          gh pr merge "$PR_URL" --auto --squash
+          gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
