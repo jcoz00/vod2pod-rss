@@ -66,29 +66,23 @@ FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS app
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Core runtime deps:
-# - ffmpeg for transcoding + audio filters
-# - python3 + pip kept installed so your updater/sidecar can pip -U yt-dlp at runtime
-# - ca-certs for https
+# Core runtime deps
 RUN set -eux; \
   apt-get update; \
   apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
-    python3 \
-    python3-pip \
     curl \
     unzip \
   ; \
   rm -rf /var/lib/apt/lists/*
 
-# Install yt-dlp via pip (keeps pip available for runtime updates)
+# Install yt-dlp as a standalone binary (no pip / no PEP668 drama)
 RUN set -eux; \
-  apt-get update; \
-  apt-get install -y --no-install-recommends python3 python3-pip ca-certificates; \
-  python3 -m pip install --no-cache-dir -U pip --break-system-packages; \
-  python3 -m pip install --no-cache-dir -U yt-dlp --break-system-packages; \
-  rm -rf /var/lib/apt/lists/*
+  curl -fsSL -o /usr/local/bin/yt-dlp \
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"; \
+  chmod 0755 /usr/local/bin/yt-dlp; \
+  /usr/local/bin/yt-dlp --version
 
 # Install Deno appropriate for TARGETPLATFORM
 RUN set -eux; \
@@ -102,6 +96,7 @@ RUN set -eux; \
   unzip /tmp/deno.zip -d /usr/local/bin; \
   rm -f /tmp/deno.zip
 
+# Rumble-friendly ffmpeg wrapper (FIXED: single RUN + properly terminated heredoc)
 RUN set -eux; \
   mv /usr/bin/ffmpeg /usr/bin/ffmpeg.real; \
   cat > /usr/local/bin/ffmpeg <<'EOF'
@@ -114,13 +109,12 @@ else
   exec /usr/bin/ffmpeg.real "$@"
 fi
 EOF
-RUN chmod 0755 /usr/local/bin/ffmpeg
+  chmod 0755 /usr/local/bin/ffmpeg
 
 # Copy built app + templates
 COPY --from=builder /src/target/*/release/app /usr/local/bin/vod2pod
 COPY --from=builder /src/templates/ /templates/
 
-# Quick sanity checks (won't fail the build if deno isn't critical)
 RUN set -eux; \
   /usr/local/bin/vod2pod --version >/dev/null 2>&1 || true; \
   deno --version >/dev/null 2>&1 || true; \
