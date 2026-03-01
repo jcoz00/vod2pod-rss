@@ -1,25 +1,59 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/github/administering-a-repository/configuration-options-for-dependency-updates
-
 version: 2
 updates:
-  - package-ecosystem: "cargo" # See documentation for possible values
-    directory: "/" # Location of package manifests
-    allow: 
-      - dependency-type: "direct"
+  # -----------------------
+  # Rust / Cargo (including Cargo.lock)
+  # -----------------------
+  - package-ecosystem: "cargo"
+    directory: "/"
     schedule:
       interval: "weekly"
+      day: "sunday"
+      time: "05:00"
+      timezone: "America/Chicago"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
     groups:
       rust-dependencies:
         patterns:
           - "*"
+    # Optional: reduce risk of "MSRV surprise" changes by ignoring major bumps
+    # for a few high-churn crates. Uncomment if you want slower change.
+    # ignore:
+    #   - dependency-name: "actix-web"
+    #     update-types: ["version-update:semver-major"]
+    #   - dependency-name: "actix-http"
+    #     update-types: ["version-update:semver-major"]
+    #   - dependency-name: "time"
+    #     update-types: ["version-update:semver-major"]
+
+  # -----------------------
+  # Python / pip
+  # -----------------------
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "daily"
-  - package-ecosystem: github-actions
-    directory: /
+      interval: "weekly"
+      day: "sunday"
+      time: "05:10"
+      timezone: "America/Chicago"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+
+  # -----------------------
+  # GitHub Actions
+  # -----------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
     schedule:
-      interval: monthly
+      interval: "monthly"
+    labels:
+      - "dependencies"
+      - "ci"
