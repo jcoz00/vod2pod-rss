@@ -77,6 +77,15 @@ RUN set -eux; \
   ; \
   rm -rf /var/lib/apt/lists/*
 
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    ca-certificates \
+    python3 \
+    curl \
+  ; \
+  rm -rf /var/lib/apt/lists/*
+
 # Install yt-dlp as a standalone binary (no pip / no PEP668 drama)
 RUN set -eux; \
   curl -fsSL -o /usr/local/bin/yt-dlp \
