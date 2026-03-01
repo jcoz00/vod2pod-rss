@@ -84,8 +84,11 @@ RUN set -eux; \
 
 # Install yt-dlp via pip (keeps pip available for runtime updates)
 RUN set -eux; \
-  python3 -m pip install --no-cache-dir -U pip; \
-  python3 -m pip install --no-cache-dir -U yt-dlp
+  apt-get update; \
+  apt-get install -y --no-install-recommends python3 python3-pip ca-certificates; \
+  python3 -m pip install --no-cache-dir -U pip --break-system-packages; \
+  python3 -m pip install --no-cache-dir -U yt-dlp --break-system-packages; \
+  rm -rf /var/lib/apt/lists/*
 
 # Install Deno appropriate for TARGETPLATFORM
 RUN set -eux; \
