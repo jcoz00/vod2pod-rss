@@ -99,10 +99,9 @@ RUN set -eux; \
   unzip /tmp/deno.zip -d /usr/local/bin; \
   rm -f /tmp/deno.zip
 
-# Optional: ffmpeg wrapper that injects Rumble headers ONLY for rumble URLs
 RUN set -eux; \
   mv /usr/bin/ffmpeg /usr/bin/ffmpeg.real; \
-  cat > /usr/local/bin/ffmpeg <<'EOF'; \
+  cat > /usr/local/bin/ffmpeg <<'EOF'
 #!/bin/sh
 set -eu
 ARGS="$*"
@@ -112,7 +111,7 @@ else
   exec /usr/bin/ffmpeg.real "$@"
 fi
 EOF
-  chmod 0755 /usr/local/bin/ffmpeg
+RUN chmod 0755 /usr/local/bin/ffmpeg
 
 # Copy built app + templates
 COPY --from=builder /src/target/*/release/app /usr/local/bin/vod2pod
