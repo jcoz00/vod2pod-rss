@@ -1,8 +1,9 @@
 [package]
-authors = ["madiele92@gmail.com"]
-edition = "2021"
+authors = ["jcoz00"]
+edition = "2026"
 name = "vod2pod-rss"
 version = "1.2.5"
+rust-version = "1.93"
 
 [lib]
 path = "src/lib.rs"
