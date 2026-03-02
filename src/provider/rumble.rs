@@ -67,6 +67,20 @@ impl RumbleProvider {
             .arg("--playlist-end")
             .arg(max_results.to_string());
 
+        // Rumble increasingly returns 403s to non-browser-looking clients.
+        // Provide a conservative browser UA + basic headers by default.
+        // Users can further tune via RUMBLE_YT_DLP_LIST_EXTRA_ARGS.
+        cmd.arg("--user-agent")
+            .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+            .arg("--add-header")
+            .arg("Accept-Language:en-US,en;q=0.9")
+            .arg("--add-header")
+            .arg("Referer:https://rumble.com/")
+            .arg("--add-header")
+            .arg("Origin:https://rumble.com")
+            .arg("--geo-bypass")
+            .arg("--no-check-certificate");
+
         for a in Self::list_extra_args() {
             cmd.arg(a);
         }

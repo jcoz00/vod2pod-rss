@@ -217,6 +217,14 @@ struct VideoIdPath {
 }
 
 async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResponse {
+    if req.method() == http::Method::HEAD {
+        // Apple Podcasts (and others) will frequently HEAD these URLs before GET.
+        // Return a correct Content-Type even for HEAD, or clients may ignore the endpoint.
+        return HttpResponse::Ok()
+            .content_type("application/json+chapters")
+            .finish();
+    }
+
     let video_id = path.into_inner().video_id;
     let key = format!("yt:chapters:{video_id}");
 
@@ -231,25 +239,9 @@ async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResp
         .unwrap_or_default();
 
     if let Some(body) = cached {
-        // Apple (and many podcast clients) often send HEAD requests first.
-        // Return correct headers for HEAD so clients don't ignore the asset.
-        if req.method() == http::Method::HEAD {
-            return HttpResponse::Ok()
-                .content_type("application/json+chapters")
-                .insert_header((http::header::CONTENT_LENGTH, body.len().to_string()))
-                .finish();
-        }
         return HttpResponse::Ok()
             .content_type("application/json+chapters")
             .body(body);
-    }
-
-    // For cache-misses: respond to HEAD with the right Content-Type, but don't
-    // trigger yt-dlp extraction work.
-    if req.method() == http::Method::HEAD {
-        return HttpResponse::Ok()
-            .content_type("application/json+chapters")
-            .finish();
     }
 
     // On-demand extraction using yt-dlp JSON.
@@ -285,6 +277,17 @@ async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResp
         .cloned()
         .unwrap_or_default();
 
+    // Apple Podcasts' implementation appears to be stricter than some other clients.
+    // Use HH:MM:SS timestamps for broad compatibility.
+    fn format_timestamp(sec: f64) -> String {
+        let total = if sec.is_finite() && sec > 0.0 { sec } else { 0.0 };
+        let whole = total.floor() as u64;
+        let h = whole / 3600;
+        let m = (whole % 3600) / 60;
+        let s = whole % 60;
+        format!("{:02}:{:02}:{:02}", h, m, s)
+    }
+
     let mut out_chapters = Vec::new();
     for c in chapters {
         let start = c
@@ -298,7 +301,7 @@ async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResp
             .to_string();
 
         out_chapters.push(serde_json::json!({
-            "startTime": start,
+            "startTime": format_timestamp(start),
             "title": title,
         }));
     }
@@ -325,6 +328,10 @@ async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResp
 }
 
 async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResponse {
+    if req.method() == http::Method::HEAD {
+        return HttpResponse::Ok().content_type("text/vtt").finish();
+    }
+
     let video_id = path.into_inner().video_id;
     let key = format!("yt:transcript:{video_id}:en");
 
@@ -339,17 +346,7 @@ async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpRe
         .unwrap_or_default();
 
     if let Some(body) = cached {
-        if req.method() == http::Method::HEAD {
-            return HttpResponse::Ok()
-                .content_type("text/vtt")
-                .insert_header((http::header::CONTENT_LENGTH, body.len().to_string()))
-                .finish();
-        }
         return HttpResponse::Ok().content_type("text/vtt").body(body);
-    }
-
-    if req.method() == http::Method::HEAD {
-        return HttpResponse::Ok().content_type("text/vtt").finish();
     }
 
     let watch_url = format!("https://www.youtube.com/watch?v={video_id}");
@@ -464,6 +461,10 @@ struct ArtQuery {
 }
 
 async fn yt_square_art(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpResponse {
+    if req.method() == http::Method::HEAD {
+        return HttpResponse::Ok().content_type("image/jpeg").finish();
+    }
+
     // SSRF protection: only allow known image hosts used by YouTube.
     let Ok(src) = Url::parse(&query.src) else {
         return HttpResponse::BadRequest().body("invalid src url");
@@ -502,18 +503,7 @@ async fn yt_square_art(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpRes
         .unwrap_or_default();
 
     if let Some(bytes) = cached {
-        if req.method() == http::Method::HEAD {
-            return HttpResponse::Ok()
-                .content_type("image/jpeg")
-                .insert_header((http::header::CONTENT_LENGTH, bytes.len().to_string()))
-                .finish();
-        }
         return HttpResponse::Ok().content_type("image/jpeg").body(bytes);
-    }
-
-    if req.method() == http::Method::HEAD {
-        // Don't fetch/render on HEAD; just advertise the correct media type.
-        return HttpResponse::Ok().content_type("image/jpeg").finish();
     }
 
     // Fetch the source image

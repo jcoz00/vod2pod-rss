@@ -131,6 +131,11 @@ fn inject_podcast_assets_tags(mut rss_xml: String, base_url: &Url) -> String {
         }
     }
 
+    // Some feeds produced by upstream libraries include a bogus `xmlns:rss` declaration.
+    // Apple Podcasts can be picky about namespace correctness; strip it if present.
+    // (This does not affect standard RSS parsing.)
+    rss_xml = rss_xml.replace(" xmlns:rss=\"http://www.itunes.com/dtds/podcast-1.0.dtd\"", "");
+
     // Build base URLs for assets.
     // IMPORTANT: never derive the base path from the *current request path*.
     // Health checks hit /health frequently, which can otherwise poison absolute URLs
@@ -204,8 +209,10 @@ fn inject_podcast_assets_tags(mut rss_xml: String, base_url: &Url) -> String {
             }
 
             out.push_str(item_block);
+            // Podcasting 2.0: chapters + transcript.
+            // Apple Podcasts seems to behave better when transcript has language + rel.
             out.push_str(&format!(
-                "\n{}<podcast:chapters url=\"{}\" type=\"application/json+chapters\" />\n<podcast:transcript url=\"{}\" type=\"text/vtt\" />\n",
+                "\n{}<podcast:chapters url=\"{}\" type=\"application/json+chapters\" />\n<podcast:transcript url=\"{}\" type=\"text/vtt\" language=\"en\" rel=\"captions\" />\n",
                 extra_item_tags, chapters_url, transcript_url
             ));
             out.push_str("</item>");
