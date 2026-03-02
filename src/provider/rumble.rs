@@ -12,7 +12,6 @@ use tokio::process::Command;
 
 use reqwest::Url;
 
-use crate::configs::ConfName;
 use crate::provider::MediaProvider;
 
 #[derive(Default)]
@@ -27,25 +26,27 @@ impl RumbleProvider {
     }
 
     fn max_results() -> usize {
-        ConfName::RumbleMaxResults
-            .get_as_u32()
-            .unwrap_or(300) as usize
+        std::env::var("RUMBLE_MAX_RESULTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(300)
     }
 
     fn min_seconds() -> u64 {
-        ConfName::RumbleMinSeconds.get_as_u64().unwrap_or(0)
+        std::env::var("RUMBLE_MIN_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
     }
 
     fn list_extra_args() -> Vec<String> {
-        let raw = ConfName::RumbleYtDlpListExtraArgs
-            .get_as_string()
+        let raw = std::env::var("RUMBLE_YT_DLP_LIST_EXTRA_ARGS")
             .unwrap_or_else(|_| "[]".to_string());
         serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
     }
 
     fn get_url_extra_args() -> Vec<String> {
-        let raw = ConfName::RumbleYtDlpGetUrlExtraArgs
-            .get_as_string()
+        let raw = std::env::var("RUMBLE_YT_DLP_GET_URL_EXTRA_ARGS")
             .unwrap_or_else(|_| "[]".to_string());
         serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
     }
@@ -208,7 +209,7 @@ impl MediaProvider for RumbleProvider {
         Self::build_rss(url.as_str()).await
     }
 
-    async fn get_stream_url(&self, url: Url) -> eyre::Result<Url> {
-        Self::extract_direct_url(&url).await
+    async fn get_stream_url(&self, media_url: &Url) -> eyre::Result<Url> {
+        Self::extract_direct_url(media_url).await
     }
 }

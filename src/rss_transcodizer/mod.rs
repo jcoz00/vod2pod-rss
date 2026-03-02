@@ -137,7 +137,9 @@ fn inject_podcast_assets_tags(mut rss_xml: String, base_url: &Url) -> String {
     // into /health/yt/... inside RSS feeds.
     //
     // Instead, always build URLs from the public origin + configured SUBFOLDER.
-    let subfolder_raw = conf().get(ConfName::Subfolder).unwrap_or_else(|_| "/".to_string());
+    let subfolder_raw = conf()
+        .get(ConfName::SubfolderPath)
+        .unwrap_or_else(|_| "/".to_string());
     let subfolder = if subfolder_raw.trim().is_empty() || subfolder_raw.trim() == "/" {
         "".to_string()
     } else {
