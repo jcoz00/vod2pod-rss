@@ -56,14 +56,16 @@ async fn flush_redis_on_new_version() -> eyre::Result<()> {
     if let Some(ref cached_version) = cached_version {
         if cached_version != app_version {
             info!("detected version change ({cached_version} != {app_version}) flushing redis DB");
-            redis::cmd("FLUSHDB").query_async(&mut con).await?;
+            redis::cmd("FLUSHDB")
+            .query_async::<()>(&mut con)
+            .await?;
         }
     }
 
     redis::cmd("SET")
         .arg("version")
         .arg(app_version)
-        .query_async(&mut con)
+        .query_async::<()>(&mut con)
         .await?;
     debug!("set cached app version to {app_version}");
 
