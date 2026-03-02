@@ -30,8 +30,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock* ./
 COPY .cargo/ ./.cargo/
 
-# If the repo ever ends up with edition="2026" (which Cargo doesn't support),
-# patch it to edition="2024" so builds won't explode.
+# Patch unsupported "edition = 2026" if it ever sneaks in
 RUN set -eux; \
   if grep -qE 'edition\s*=\s*"\s*2026\s*"' Cargo.toml; then \
     echo "Patching Cargo.toml edition 2026 -> 2024"; \
@@ -57,6 +56,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo build --release --target "$(cat /rust_platform.txt)"
 
+# Stash the exact output path so runtime copy is deterministic
+RUN set -eux; \
+  TGT="$(cat /rust_platform.txt)"; \
+  install -D "/src/target/${TGT}/release/app" /out/vod2pod; \
+  echo "${TGT}" > /out/rust_target.txt
+
 # -----------------------------------------
 # Runtime (runs on TARGETPLATFORM)
 # -----------------------------------------
@@ -65,32 +70,29 @@ FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS app
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Core runtime deps
+# Core runtime deps:
+# - ffmpeg for transcoding
+# - python3 + pip (required for your yt-dlp-updater sidecar)
+# - ca-certs for https
+# - curl/unzip for deno install
 RUN set -eux; \
   apt-get update; \
   apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
+    python3 \
+    python3-pip \
     curl \
     unzip \
   ; \
   rm -rf /var/lib/apt/lists/*
 
+# Install yt-dlp via pip (PEP 668 requires break-system-packages on Debian)
 RUN set -eux; \
-  apt-get update; \
-  apt-get install -y --no-install-recommends \
-    ca-certificates \
-    python3 \
-    curl \
-  ; \
-  rm -rf /var/lib/apt/lists/*
-
-# Install yt-dlp as a standalone binary (no pip / no PEP668 drama)
-RUN set -eux; \
-  curl -fsSL -o /usr/local/bin/yt-dlp \
-    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"; \
-  chmod 0755 /usr/local/bin/yt-dlp; \
-  /usr/local/bin/yt-dlp --version
+  python3 -m pip install --no-cache-dir -U pip --break-system-packages; \
+  python3 -m pip install --no-cache-dir -U yt-dlp --break-system-packages; \
+  yt-dlp --version; \
+  python3 -m yt_dlp --version
 
 # Install Deno appropriate for TARGETPLATFORM
 RUN set -eux; \
@@ -102,9 +104,10 @@ RUN set -eux; \
   esac; \
   curl -fsSL "https://github.com/denoland/deno/releases/latest/download/${DENO_ZIP}" -o /tmp/deno.zip; \
   unzip /tmp/deno.zip -d /usr/local/bin; \
-  rm -f /tmp/deno.zip
+  rm -f /tmp/deno.zip; \
+  deno --version
 
-# Rumble-friendly ffmpeg wrapper (FIXED: single RUN + properly terminated heredoc)
+# Rumble-friendly ffmpeg wrapper (single RUN, properly terminated heredoc)
 RUN set -eux; \
   mv /usr/bin/ffmpeg /usr/bin/ffmpeg.real; \
   cat > /usr/local/bin/ffmpeg <<'EOF'
@@ -117,16 +120,19 @@ else
   exec /usr/bin/ffmpeg.real "$@"
 fi
 EOF
-RUN chmod 0755 /usr/local/bin/ffmpeg
+  chmod 0755 /usr/local/bin/ffmpeg
 
-# Copy built app + templates
-COPY --from=builder /src/target/*/release/app /usr/local/bin/vod2pod
+# Copy built app + templates (no wildcard path)
+COPY --from=builder /out/vod2pod /usr/local/bin/vod2pod
 COPY --from=builder /src/templates/ /templates/
 
+# Sanity checks
 RUN set -eux; \
   /usr/local/bin/vod2pod --version >/dev/null 2>&1 || true; \
   deno --version >/dev/null 2>&1 || true; \
-  yt-dlp --version >/dev/null 2>&1 || true
+  python3 -m pip --version >/dev/null 2>&1 || true; \
+  yt-dlp --version >/dev/null 2>&1 || true; \
+  python3 -m yt_dlp --version >/dev/null 2>&1 || true
 
 EXPOSE 8080
 CMD ["/usr/local/bin/vod2pod"]
