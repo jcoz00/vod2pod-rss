@@ -11,7 +11,6 @@ ARG TARGETPLATFORM
 ENV CARGO_HOME=/usr/local/cargo
 ENV CARGO_TERM_COLOR=always
 
-# Determine Rust target triple for the requested TARGETPLATFORM
 RUN set -eux; \
   case "$TARGETPLATFORM" in \
     "linux/arm/v7")  echo "armv7-unknown-linux-gnueabihf" > /rust_platform.txt ;; \
@@ -21,46 +20,37 @@ RUN set -eux; \
   esac; \
   echo "BUILDPLATFORM=$BUILDPLATFORM TARGETPLATFORM=$TARGETPLATFORM rust_target=$(cat /rust_platform.txt)"
 
-# Add target stdlib
 RUN rustup target add "$(cat /rust_platform.txt)"
 
 WORKDIR /src
 
-# Copy only manifests first (better caching)
 COPY Cargo.toml Cargo.lock* ./
 COPY .cargo/ ./.cargo/
 
-# Patch unsupported "edition = 2026" if it ever sneaks in
 RUN set -eux; \
   if grep -qE 'edition\s*=\s*"\s*2026\s*"' Cargo.toml; then \
     echo "Patching Cargo.toml edition 2026 -> 2024"; \
     sed -i 's/edition[[:space:]]*=[[:space:]]*"2026"/edition = "2024"/' Cargo.toml; \
   fi
 
-# Fetch deps with cache mounts
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo fetch
 
-# Now copy the rest of the source
 COPY src ./src
 COPY templates ./templates
 COPY set_version.sh version.txt* ./
 
-# Set version (if your project uses this)
 RUN set -eux; \
   if [ -f ./set_version.sh ]; then sh ./set_version.sh; fi
 
-# Build with cache mounts
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo build --release --target "$(cat /rust_platform.txt)"
 
-# Stash the exact output path so runtime copy is deterministic
 RUN set -eux; \
   TGT="$(cat /rust_platform.txt)"; \
-  install -D "/src/target/${TGT}/release/app" /out/vod2pod; \
-  echo "${TGT}" > /out/rust_target.txt
+  install -D "/src/target/${TGT}/release/app" /out/vod2pod
 
 # -----------------------------------------
 # Runtime (runs on TARGETPLATFORM)
@@ -70,11 +60,6 @@ FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS app
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Core runtime deps:
-# - ffmpeg for transcoding
-# - python3 + pip (required for your yt-dlp-updater sidecar)
-# - ca-certs for https
-# - curl/unzip for deno install
 RUN set -eux; \
   apt-get update; \
   apt-get install -y --no-install-recommends \
@@ -87,7 +72,7 @@ RUN set -eux; \
   ; \
   rm -rf /var/lib/apt/lists/*
 
-# Install yt-dlp via pip (PEP 668 requires break-system-packages on Debian)
+# yt-dlp via pip (required for your updater sidecar)
 RUN set -eux; \
   python3 -m pip install --no-cache-dir -U pip --break-system-packages; \
   python3 -m pip install --no-cache-dir -U yt-dlp --break-system-packages; \
@@ -107,7 +92,7 @@ RUN set -eux; \
   rm -f /tmp/deno.zip; \
   deno --version
 
-# Rumble-friendly ffmpeg wrapper (single RUN, properly terminated heredoc)
+# Rumble-friendly ffmpeg wrapper (ALL inside one RUN)
 RUN set -eux; \
   mv /usr/bin/ffmpeg /usr/bin/ffmpeg.real; \
   cat > /usr/local/bin/ffmpeg <<'EOF'
@@ -122,11 +107,9 @@ fi
 EOF
   chmod 0755 /usr/local/bin/ffmpeg
 
-# Copy built app + templates (no wildcard path)
 COPY --from=builder /out/vod2pod /usr/local/bin/vod2pod
 COPY --from=builder /src/templates/ /templates/
 
-# Sanity checks
 RUN set -eux; \
   /usr/local/bin/vod2pod --version >/dev/null 2>&1 || true; \
   deno --version >/dev/null 2>&1 || true; \
