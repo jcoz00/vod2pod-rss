@@ -99,30 +99,11 @@ FFMPEG_AUDIO_FILTER=dynaudnorm=f=150:g=12:m=10,alimiter=limit=0.98
 ```
 
 ### Apple Podcasts / RSS metadata
-These populate `<channel>` and `<item>` tags using Apple’s RSS expectations.
+This fork auto-populates Apple/iTunes + PodcastIndex metadata **per source channel**.
 
-| Variable | Notes |
-|---|---|
-| `PODCAST_TITLE` | Show title (`<title>` / `<itunes:title>`). |
-| `PODCAST_DESCRIPTION` | Show description (`<description>` / `<itunes:summary>`). |
-| `PODCAST_IMAGE_URL` | Artwork URL (`<itunes:image href="...">`). |
-| `PODCAST_LANGUAGE` | ISO 639 language code (`en`, `en-us`, etc.). |
-| `PODCAST_CATEGORY` | Apple category string (e.g. `Society &amp; Culture`). |
-| `PODCAST_AUTHOR` | `<itunes:author>`. |
-| `PODCAST_OWNER_NAME` / `PODCAST_OWNER_EMAIL` | `<itunes:owner>`. |
-| `PODCAST_EXPLICIT` | `true`/`false` (`<itunes:explicit>`). |
-| `PODCAST_TYPE` | `episodic` (default) or `serial`. |
-| `PODCAST_WEBSITE` | `<link>` for the show. |
-| `PODCAST_COPYRIGHT` | `<copyright>`. |
-| `PODCAST_GENERATOR` | `<generator>`. |
-
-### Chapters + transcripts (optional)
-| Variable | Default | Notes |
-|---|---:|---|
-| `PODCAST_CHAPTERS` | `false` | If `true`, emits `<podcast:chapters>` links when chapter data is available. |
-| `PODCAST_TRANSCRIPTS` | `false` | If `true`, emits `<podcast:transcript>` links when transcript data is available. |
-
----
+- **YouTube (API key mode):** title/description/author, language (**en**), best-fit iTunes category (from YouTube categories), show + episode artwork (auto-generated square JPEGs), duration, and stable GUIDs.
+- **Twitch/Rumble:** title/description/author and sensible defaults when the platform doesn’t provide a field.
+- **Chapters + transcripts:** emitted automatically for supported providers and served on-demand from Redis-backed endpoints.
 
 ## yt-dlp PO Token provider (YouTube 403 mitigation)
 If you’re using a PO token provider (bgutil), pass yt-dlp extractor args (example):

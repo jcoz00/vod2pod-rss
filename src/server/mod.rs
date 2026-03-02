@@ -7,6 +7,11 @@ use log::{debug, error, info, warn};
 use regex::Regex;
 use serde::Deserialize;
 use url::Url;
+use tokio::process::Command;
+use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
+
+use image::{imageops, DynamicImage, GenericImageView};
 
 use crate::{
     configs::{conf, Conf, ConfName},
@@ -40,7 +45,29 @@ pub fn spawn_server(listener: TcpListener) -> eyre::Result<Server> {
                     )
                     .route("transcodize_rss", web::get().to(transcodize_rss))
                     .route("transcodize_rss", web::head().to(transcodize_rss))
-                    .route("health", web::get().to(health))
+                    .service(
+                        web::resource("yt/chapters/{video_id}.json")
+                            .name("yt_chapters")
+                            .guard(guard::Any(guard::Get()).or(guard::Head()))
+                            .to(yt_chapters),
+                    )
+                    .service(
+                        web::resource("yt/transcripts/{video_id}.vtt")
+                            .name("yt_transcript")
+                            .guard(guard::Any(guard::Get()).or(guard::Head()))
+                            .to(yt_transcript),
+                    )
+                    .service(
+                        web::resource("yt/art/square.jpg")
+                            .name("yt_square_art")
+                            .guard(guard::Any(guard::Get()).or(guard::Head()))
+                            .to(yt_square_art),
+                    )
+                    .service(
+                        web::resource("health")
+                            .name("health")
+                            .route(web::get().to(health)),
+                    )
                     .route("/", web::get().to(index))
                     .route("", web::get().to(index)),
             )
@@ -97,6 +124,10 @@ async fn transcodize_rss(
 
     let transcode_service_url = req.url_for("transcode_mp3", [""]).unwrap();
 
+    // Base URL for Podcasting 2.0 assets endpoints (chapters/transcripts).
+    // This resolves to the same scheme/host/subfolder as the current request.
+    let podcast_assets_base_url = req.url_for("health", &[] as &[&str]).ok();
+
     let parsed_url = match Url::parse(url) {
         Ok(x) => x,
         Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
@@ -145,6 +176,7 @@ async fn transcodize_rss(
     let injected_feed = rss_transcodizer::inject_vod2pod_customizations(
         raw_rss,
         should_transcode.then_some(transcode_service_url),
+        podcast_assets_base_url,
     );
 
     let body = match injected_feed {
@@ -177,6 +209,342 @@ async fn transcodize_rss(
     HttpResponse::Ok()
         .content_type("application/xml")
         .body(body)
+}
+
+#[derive(Deserialize)]
+struct VideoIdPath {
+    video_id: String,
+}
+
+async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResponse {
+    if req.method() == http::Method::HEAD {
+        return HttpResponse::Ok().finish();
+    }
+
+    let video_id = path.into_inner().video_id;
+    let key = format!("yt:chapters:{video_id}");
+
+    let Ok(mut redis) = crate::get_redis_client().await else {
+        return HttpResponse::InternalServerError().finish();
+    };
+
+    let cached: Option<String> = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    if let Some(body) = cached {
+        return HttpResponse::Ok()
+            .content_type("application/json")
+            .body(body);
+    }
+
+    // On-demand extraction using yt-dlp JSON.
+    let watch_url = format!("https://www.youtube.com/watch?v={video_id}");
+    let out = Command::new("yt-dlp")
+        .arg("-j")
+        .arg("--no-playlist")
+        .arg(&watch_url)
+        .output()
+        .await;
+
+    let json = match out {
+        Ok(x) if x.status.success() => {
+            let stdout = String::from_utf8_lossy(&x.stdout);
+            serde_json::from_str::<JsonValue>(stdout.trim()).ok()
+        }
+        Ok(x) => {
+            let stderr = String::from_utf8_lossy(&x.stderr);
+            warn!("yt-dlp -j failed for {watch_url}: {stderr}");
+            None
+        }
+        Err(e) => {
+            warn!("yt-dlp -j spawn failed for {watch_url}: {e}");
+            None
+        }
+    };
+
+    // Convert to Podcasting 2.0 JSON Chapters.
+    let chapters = json
+        .as_ref()
+        .and_then(|j| j.get("chapters"))
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out_chapters = Vec::new();
+    for c in chapters {
+        let start = c
+            .get("start_time")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let title = c
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        out_chapters.push(serde_json::json!({
+            "startTime": start,
+            "title": title,
+        }));
+    }
+
+    let payload = serde_json::json!({
+        "version": "1.2.0",
+        "chapters": out_chapters,
+    })
+    .to_string();
+
+    // Cache (30 days). Even empty chapters are cached to keep the system stateless.
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&payload)
+        .arg("EX")
+        .arg(60_u64 * 60 * 24 * 30)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .body(payload)
+}
+
+async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResponse {
+    if req.method() == http::Method::HEAD {
+        return HttpResponse::Ok().finish();
+    }
+
+    let video_id = path.into_inner().video_id;
+    let key = format!("yt:transcript:{video_id}:en");
+
+    let Ok(mut redis) = crate::get_redis_client().await else {
+        return HttpResponse::InternalServerError().finish();
+    };
+
+    let cached: Option<String> = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    if let Some(body) = cached {
+        return HttpResponse::Ok().content_type("text/vtt").body(body);
+    }
+
+    let watch_url = format!("https://www.youtube.com/watch?v={video_id}");
+    let out = Command::new("yt-dlp")
+        .arg("-j")
+        .arg("--no-playlist")
+        .arg(&watch_url)
+        .output()
+        .await;
+
+    let json = match out {
+        Ok(x) if x.status.success() => {
+            let stdout = String::from_utf8_lossy(&x.stdout);
+            serde_json::from_str::<JsonValue>(stdout.trim()).ok()
+        }
+        Ok(x) => {
+            let stderr = String::from_utf8_lossy(&x.stderr);
+            warn!("yt-dlp -j failed for {watch_url}: {stderr}");
+            None
+        }
+        Err(e) => {
+            warn!("yt-dlp -j spawn failed for {watch_url}: {e}");
+            None
+        }
+    };
+
+    // Try to find a VTT subtitle URL (prefer human subtitles, fallback to auto captions).
+    let vtt_url = pick_best_vtt_url(json.as_ref());
+
+    let mut vtt_body = None;
+    if let Some(url) = vtt_url {
+        match reqwest::get(url).await {
+            Ok(resp) if resp.status().is_success() => {
+                vtt_body = resp.text().await.ok();
+            }
+            Ok(resp) => {
+                warn!("caption fetch failed status {} for {watch_url}", resp.status());
+            }
+            Err(e) => {
+                warn!("caption fetch error for {watch_url}: {e}");
+            }
+        }
+    }
+
+    // If we can't fetch a transcript, return an empty but valid VTT.
+    let payload = vtt_body.unwrap_or_else(|| "WEBVTT\n\n".to_string());
+
+    // Cache (30 days).
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&payload)
+        .arg("EX")
+        .arg(60_u64 * 60 * 24 * 30)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    HttpResponse::Ok().content_type("text/vtt").body(payload)
+}
+
+fn pick_best_vtt_url(json: Option<&JsonValue>) -> Option<String> {
+    let j = json?;
+
+    // Helper: select a vtt url from a subtitles map.
+    fn select(map: &JsonValue) -> Option<String> {
+        let obj = map.as_object()?;
+        // Prefer English-ish tracks.
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        let preferred = keys
+            .iter()
+            .find(|k| k.starts_with("en"))
+            .copied()
+            .or_else(|| keys.first().copied())?;
+
+        let arr = obj.get(preferred)?.as_array()?;
+        // Prefer VTT ext
+        for f in arr {
+            if f.get("ext").and_then(|e| e.as_str()) == Some("vtt") {
+                if let Some(u) = f.get("url").and_then(|u| u.as_str()) {
+                    return Some(u.to_string());
+                }
+            }
+        }
+        // Fallback to any
+        for f in arr {
+            if let Some(u) = f.get("url").and_then(|u| u.as_str()) {
+                return Some(u.to_string());
+            }
+        }
+        None
+    }
+
+    // Prefer human subtitles.
+    if let Some(subs) = j.get("subtitles") {
+        if let Some(u) = select(subs) {
+            return Some(u);
+        }
+    }
+    // Fallback to auto captions.
+    if let Some(auto) = j.get("automatic_captions") {
+        if let Some(u) = select(auto) {
+            return Some(u);
+        }
+    }
+    None
+}
+
+#[derive(Deserialize)]
+struct ArtQuery {
+    src: String,
+}
+
+async fn yt_square_art(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpResponse {
+    if req.method() == http::Method::HEAD {
+        return HttpResponse::Ok().finish();
+    }
+
+    // SSRF protection: only allow known image hosts used by YouTube.
+    let Ok(src) = Url::parse(&query.src) else {
+        return HttpResponse::BadRequest().body("invalid src url");
+    };
+
+    if src.scheme() != "http" && src.scheme() != "https" {
+        return HttpResponse::BadRequest().body("invalid scheme");
+    }
+
+    let host = src.host_str().unwrap_or_default();
+    let allowed = [
+        "ytimg.com",
+        "i.ytimg.com",
+        "img.youtube.com",
+        "googleusercontent.com",
+        "lh3.googleusercontent.com",
+    ];
+    if !allowed.iter().any(|d| host == *d || host.ends_with(&format!(".{d}"))) {
+        return HttpResponse::Forbidden().body("host not allowed");
+    }
+
+    // Cache key by sha256(src)
+    let mut hasher = Sha256::new();
+    hasher.update(src.as_str().as_bytes());
+    let digest = hasher.finalize();
+    let key = format!("img:square:{}", hex::encode(digest));
+
+    let Ok(mut redis) = crate::get_redis_client().await else {
+        return HttpResponse::InternalServerError().finish();
+    };
+
+    let cached: Option<Vec<u8>> = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    if let Some(bytes) = cached {
+        return HttpResponse::Ok().content_type("image/jpeg").body(bytes);
+    }
+
+    // Fetch the source image
+    let resp = match reqwest::get(src.clone()).await {
+        Ok(r) => r,
+        Err(e) => return HttpResponse::BadGateway().body(format!("fetch failed: {e}")),
+    };
+
+    if !resp.status().is_success() {
+        return HttpResponse::BadGateway().body(format!("fetch status {}", resp.status()));
+    }
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::BadGateway().body(format!("fetch body failed: {e}")),
+    };
+
+    let img = match image::load_from_memory(&bytes) {
+        Ok(i) => i,
+        Err(e) => return HttpResponse::UnsupportedMediaType().body(format!("decode failed: {e}")),
+    };
+
+    let jpg = match render_square_jpeg(img) {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("render failed: {e}")),
+    };
+
+    // Cache 30 days
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&jpg)
+        .arg("EX")
+        .arg(60_u64 * 60 * 24 * 30)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    HttpResponse::Ok().content_type("image/jpeg").body(jpg)
+}
+
+fn render_square_jpeg(img: DynamicImage) -> eyre::Result<Vec<u8>> {
+    // 1) Center-crop to square
+    let (w, h) = img.dimensions();
+    let side = w.min(h);
+    let x0 = (w - side) / 2;
+    let y0 = (h - side) / 2;
+    let cropped = img.crop_imm(x0, y0, side, side);
+
+    // 2) Resize to Apple-safe size (3000x3000, RGB, no alpha)
+    let resized = imageops::resize(&cropped.to_rgb8(), 3000, 3000, imageops::FilterType::Lanczos3);
+
+    // 3) Encode JPEG
+    let mut out = Vec::with_capacity(512 * 1024);
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
+    encoder.encode_image(&DynamicImage::ImageRgb8(resized))?;
+    Ok(out)
 }
 
 #[derive(Deserialize)]

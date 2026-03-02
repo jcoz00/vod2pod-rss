@@ -30,6 +30,7 @@ use rss::{
     extension::itunes::{ITunesChannelExtensionBuilder, ITunesItemExtensionBuilder},
     Channel, ChannelBuilder, GuidBuilder, ImageBuilder, Item, ItemBuilder,
 };
+use rss::extension::itunes::ITunesCategory;
 use tokio::process::Command;
 
 use crate::{
@@ -174,13 +175,15 @@ async fn fetch_from_api(id: IdType, api_key: String) -> eyre::Result<(Channel, V
 
             let playlist_id = playlist.id.take().ok_or(eyre!("playlist has no id"))?;
 
-            let rss_channel = build_channel_from_playlist(playlist);
+            let mut rss_channel = build_channel_from_playlist(playlist);
 
             let max_fetched_items: usize =
                 conf().get(ConfName::YoutubeMaxResults).unwrap().parse()?;
             let items = fetch_playlist_items(&playlist_id, &api_key, max_fetched_items).await?;
 
             let duration_map = create_duration_url_map(&items, &api_key).await?;
+
+            apply_best_fit_itunes_category(&mut rss_channel, &duration_map);
 
             let rss_items = build_channel_items_from_playlist(items, duration_map);
 
@@ -199,13 +202,15 @@ async fn fetch_from_api(id: IdType, api_key: String) -> eyre::Result<(Channel, V
                 .uploads
                 .ok_or(eyre!("uploads is None"))?;
 
-            let rss_channel = build_channel_from_yt_channel(channel);
+            let mut rss_channel = build_channel_from_yt_channel(channel);
 
             let max_fetched_items: usize =
                 conf().get(ConfName::YoutubeMaxResults).unwrap().parse()?;
             let items = fetch_playlist_items(&upload_playlist, &api_key, max_fetched_items).await?;
 
             let duration_map = create_duration_url_map(&items, &api_key).await?;
+
+            apply_best_fit_itunes_category(&mut rss_channel, &duration_map);
 
             let rss_items = build_channel_items_from_playlist(items, duration_map);
 
@@ -225,6 +230,60 @@ macro_rules! get_thumb {
                 .or(thumbs.default)
         })
     };
+}
+
+fn apply_best_fit_itunes_category(channel: &mut Channel, infos: &HashMap<String, VideoExtraInfo>) {
+    // Pick the most common YouTube categoryId among the fetched videos and map to the closest
+    // Apple Podcasts category. This is an approximation (YouTube categories don't match 1:1).
+    let mut counts: HashMap<(String, Option<String>), usize> = HashMap::new();
+    for info in infos.values() {
+        if let Some(ref yt_id) = info.yt_category_id {
+            if let Some((primary, secondary)) = map_yt_category_to_itunes(yt_id) {
+                *counts.entry((primary, secondary)).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let best = counts.into_iter().max_by_key(|(_, c)| *c).map(|(k, _)| k);
+    let Some((primary, secondary)) = best else {
+        return;
+    };
+
+    if let Some(ref mut itunes) = channel.itunes_ext {
+        let mut cat = ITunesCategory::default();
+        cat.set_text(&primary);
+        if let Some(sub) = secondary {
+            let mut subcat = ITunesCategory::default();
+            subcat.set_text(&sub);
+            cat.set_sub_categories(vec![subcat]);
+        }
+        itunes.set_categories(vec![cat]);
+    }
+}
+
+fn map_yt_category_to_itunes(yt_category_id: &str) -> Option<(String, Option<String>)> {
+    // YouTube video category IDs (common set) → Apple Podcasts categories (best-fit).
+    // Ref: YouTube "videoCategories" list (IDs like 10 Music, 20 Gaming, etc.).
+    // Apple only uses the first category/subcategory.
+    match yt_category_id {
+        "1" => Some(("TV & Film".to_string(), Some("Film Reviews".to_string()))), // Film & Animation
+        "2" => Some(("Leisure".to_string(), Some("Automotive".to_string()))), // Autos & Vehicles
+        "10" => Some(("Music".to_string(), None)),
+        "15" => Some(("Kids & Family".to_string(), Some("Pets & Animals".to_string()))),
+        "17" => Some(("Sports".to_string(), None)),
+        "19" => Some(("Society & Culture".to_string(), Some("Places & Travel".to_string()))),
+        "20" => Some(("Leisure".to_string(), Some("Video Games".to_string()))),
+        "21" => Some(("Society & Culture".to_string(), Some("Personal Journals".to_string()))),
+        "22" => Some(("Society & Culture".to_string(), None)),
+        "23" => Some(("Comedy".to_string(), None)),
+        "24" => Some(("TV & Film".to_string(), Some("After Shows".to_string()))),
+        "25" => Some(("News".to_string(), None)),
+        "26" => Some(("Arts".to_string(), Some("Fashion & Beauty".to_string()))),
+        "27" => Some(("Education".to_string(), None)),
+        "28" => Some(("Technology".to_string(), None)),
+        "29" => Some(("Society & Culture".to_string(), Some("Philanthropy".to_string()))),
+        _ => None,
+    }
 }
 
 fn build_channel_from_yt_channel(channel: api::Channel) -> Channel {
@@ -275,6 +334,7 @@ async fn fetch_channel(id: String, api_key: &str) -> eyre::Result<api::Channel> 
 #[derive(Debug, Clone)]
 struct VideoExtraInfo {
     duration: iso8601_duration::Duration,
+    yt_category_id: Option<String>,
 }
 
 async fn create_duration_url_map(
@@ -292,7 +352,7 @@ async fn create_duration_url_map(
         .map(|batch| {
             let mut req = hub
                 .videos()
-                .list(&vec!["contentDetails".to_owned()])
+                .list(&vec!["contentDetails".to_owned(), "snippet".to_owned()])
                 .clear_scopes()
                 .param("key", api_key);
 
@@ -321,6 +381,7 @@ async fn create_duration_url_map(
                 VideoExtraInfo {
                     duration: iso8601_duration::Duration::parse(&v.content_details?.duration?)
                         .ok()?,
+                    yt_category_id: v.snippet.and_then(|s| s.category_id),
                 },
             ))
         })
