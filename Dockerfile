@@ -41,7 +41,8 @@ RUN set -eux; \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo build --release --target "$(cat /rust_platform.txt)"
-
+    
+RUN mkdir -p /out
 # copy the built binary to a stable path (avoid wildcard COPY surprises)
 RUN set -eux; \
   BIN="/src/target/$(cat /rust_platform.txt)/release/app"; \
