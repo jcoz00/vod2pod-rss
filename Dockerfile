@@ -55,7 +55,6 @@ RUN set -eux; \
 # Build with cache mounts
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
     cargo build --release --target "$(cat /rust_platform.txt)"
 
 # -----------------------------------------
