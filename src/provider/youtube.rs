@@ -255,7 +255,7 @@ fn apply_best_fit_itunes_category(channel: &mut Channel, infos: &HashMap<String,
         if let Some(sub) = secondary {
             let mut subcat = ITunesCategory::default();
             subcat.set_text(&sub);
-            cat.set_sub_categories(vec![subcat]);
+            cat.set_subcategory(vec![subcat]);
         }
         itunes.set_categories(vec![cat]);
     }
