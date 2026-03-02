@@ -1,20 +1,26 @@
+// youtube.rs — drop-in replacement with Redis-cached keys/values changed from Url -> String
+// to avoid redis trait/version issues (cached + redis 0.32.x compatibility).
+
 #[allow(unused_imports)]
 use cached::proc_macro::io_cached;
 #[allow(unused_imports)]
 use cached::AsyncRedisCache;
+
+use bytes::Bytes;
 use feed_rs::model::Feed;
 use google_youtube3::{
     api::{self, PlaylistItem},
-    hyper, hyper_rustls, YouTube,
+    common, hyper, hyper_rustls, YouTube,
 };
-use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
-use google_youtube3::common;
-use std::pin::Pin;
-use std::future::Future;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
-use std::{collections::HashMap, str::FromStr, time::Duration};
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::str::FromStr;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use eyre::eyre;
@@ -71,7 +77,11 @@ impl MediaProvider for YoutubeProvider {
                         || path.starts_with("/@") =>
                     {
                         let url = find_yt_channel_url_with_c_id(&channel_url).await?;
-                        let channel_id = url.path_segments().unwrap().last().unwrap();
+                        let channel_id = url
+                            .path_segments()
+                            .ok_or_else(|| eyre!("could not parse channel id"))?
+                            .last()
+                            .ok_or_else(|| eyre!("could not parse channel id"))?;
                         IdType::Channel(channel_id.into())
                     }
                     _ => return Err(eyre!("unsupported youtube url")),
@@ -82,6 +92,7 @@ impl MediaProvider for YoutubeProvider {
                 feed_builder.description(video_items.0.description);
                 feed_builder.title(video_items.0.title);
                 feed_builder.language(video_items.0.language.take());
+
                 let mut image_builder = ImageBuilder::default();
                 image_builder.url(
                     video_items
@@ -97,7 +108,7 @@ impl MediaProvider for YoutubeProvider {
 
                 feed_builder.items(video_items.1);
 
-                return Ok(feed_builder.build().to_string());
+                Ok(feed_builder.build().to_string())
             }
             None => {
                 info!(
@@ -105,30 +116,29 @@ impl MediaProvider for YoutubeProvider {
                     channel_url
                 );
                 let feed = match channel_url.path() {
-                    path if path.starts_with("/playlist") => {
-                        feed_url_for_yt_playlist(&channel_url).await
-                    }
+                    path if path.starts_with("/playlist") => feed_url_for_yt_playlist(&channel_url).await,
                     path if path.starts_with("/feeds/") => feed_url_for_yt_atom(&channel_url).await,
-                    path if path.starts_with("/channel/") => {
-                        feed_url_for_yt_channel(&channel_url).await
-                    }
-                    path if path.starts_with("/user/") => {
-                        feed_url_for_yt_channel(&channel_url).await
-                    }
+                    path if path.starts_with("/channel/") => feed_url_for_yt_channel(&channel_url).await,
+                    path if path.starts_with("/user/") => feed_url_for_yt_channel(&channel_url).await,
                     path if path.starts_with("/c/") => feed_url_for_yt_channel(&channel_url).await,
                     path if path.starts_with("/@") => feed_url_for_yt_channel(&channel_url).await,
                     _ => Err(eyre!("unsupported youtube url")),
                 }?;
+
                 let raw_atom_feed = reqwest::get(feed).await?.text().await?;
-                let feed = feed_rs::parser::parse(&raw_atom_feed.into_bytes()[..]).unwrap();
+                let feed = feed_rs::parser::parse(&raw_atom_feed.into_bytes()[..])
+                    .map_err(|e| eyre!("failed to parse atom feed: {e}"))?;
+
                 let mut duration_map: HashMap<String, Option<usize>> = HashMap::default();
                 for link in feed.clone().entries.iter().filter_map(|e| e.links.first()) {
+                    let parsed = link.href.parse::<Url>()?;
                     duration_map.insert(
-                        link.clone().href,
-                        get_youtube_video_duration_with_ytdlp(&link.href.parse::<Url>()?).await?,
+                        link.href.clone(),
+                        get_youtube_video_duration_with_ytdlp(&parsed).await?,
                     );
                 }
-                return Ok(convert_atom_to_rss(feed, duration_map));
+
+                Ok(convert_atom_to_rss(feed, duration_map))
             }
         }
     }
@@ -148,7 +158,7 @@ impl MediaProvider for YoutubeProvider {
 
         #[cfg(not(test))]
         return youtube_whitelist;
-        #[cfg(test)] //this will allow test to use localhost ad still work
+        #[cfg(test)] // this will allow test to use localhost and still work
         return [
             youtube_whitelist,
             vec![regex::Regex::new(r"^http://127\.0\.0\.1:9870").unwrap()],
@@ -223,14 +233,15 @@ fn build_channel_from_yt_channel(channel: api::Channel) -> Channel {
     let mut itunes_channel_builder = ITunesChannelExtensionBuilder::default();
 
     if let Some(mut snippet) = channel.snippet {
-        channel_builder.description(snippet.description.take().unwrap_or("".to_owned()));
-        channel_builder.title(snippet.title.take().unwrap_or("".to_owned()));
+        channel_builder.description(snippet.description.take().unwrap_or_default());
+        channel_builder.title(snippet.title.take().unwrap_or_default());
         channel_builder.language(snippet.default_language.take());
         if let Some(mut thumb) = get_thumb!(snippet) {
             itunes_channel_builder.image(thumb.url.take());
         }
         itunes_channel_builder.explicit(Some("no".to_owned()));
     }
+
     channel_builder.link(format!(
         "https://www.youtube.com/channel/{}",
         channel.id.unwrap_or_default()
@@ -249,6 +260,7 @@ async fn fetch_channel(id: String, api_key: &str) -> eyre::Result<api::Channel> 
         .max_results(1)
         .add_id(&id)
         .param("key", api_key);
+
     let result = channel_request.doit().await?;
     let channel = result
         .1
@@ -257,6 +269,7 @@ async fn fetch_channel(id: String, api_key: &str) -> eyre::Result<api::Channel> 
         .first()
         .ok_or(eyre!("youtube returned no channel with id {:?}", id))?
         .clone();
+
     Ok(channel)
 }
 
@@ -321,14 +334,15 @@ fn build_channel_items_from_playlist(
     items: Vec<PlaylistItem>,
     videos_infos: HashMap<String, VideoExtraInfo>,
 ) -> Vec<Item> {
-    let rss_item: Vec<Item> = items
+    items
         .into_iter()
         .filter_map(|item| {
             let mut snippet = item.snippet?;
-            let title = snippet.title.take().unwrap_or("".to_owned());
-            let description = snippet.description.take().unwrap_or("".to_owned());
+            let title = snippet.title.take().unwrap_or_default();
+            let description = snippet.description.take().unwrap_or_default();
             let video_id = snippet.resource_id.take()?.video_id?;
-            let url = Url::parse(&format!("https://www.youtube.com/watch?v={}", &video_id)).ok()?;
+            let url = Url::parse(&format!("https://www.youtube.com/watch?v={video_id}")).ok()?;
+
             let mut item_builder = ItemBuilder::default();
             item_builder.title(Some(title));
             item_builder.description(Some(description.clone()));
@@ -340,10 +354,12 @@ fn build_channel_items_from_playlist(
                     .map(|pub_date| pub_date.to_rfc2822().to_string()),
             );
             item_builder.author(snippet.channel_title.take());
+
             let video_infos = videos_infos.get(&video_id).or_else(|| {
                 warn!("no duration found for {:?}", &video_id);
                 None
             })?;
+
             let itunes_item_extension = ITunesItemExtensionBuilder::default()
                 .summary(Some(description))
                 .duration(Some({
@@ -354,11 +370,11 @@ fn build_channel_items_from_playlist(
                 }))
                 .image(get_thumb!(snippet).and_then(|t| t.url))
                 .build();
+
             item_builder.itunes_ext(Some(itunes_item_extension));
             Some(item_builder.build())
         })
-        .collect();
-    rss_item
+        .collect()
 }
 
 async fn fetch_playlist_items(
@@ -371,14 +387,13 @@ async fn fetch_playlist_items(
     let mut fetched_playlist_items: Vec<PlaylistItem> = Vec::with_capacity(max_fetched_items);
     let mut request_count = 0;
     let mut next_page_token: Option<String> = None;
+
     debug!("fetching items from playlist {}", playlist_id);
+
     loop {
         let remaining_items = max_fetched_items - fetched_playlist_items.len();
-        let items_to_fetch = if remaining_items > 50 {
-            50
-        } else {
-            remaining_items
-        };
+        let items_to_fetch = if remaining_items > 50 { 50 } else { remaining_items };
+
         let mut playlist_items_request = hub
             .playlist_items()
             .list(&vec!["snippet".into()])
@@ -410,11 +425,13 @@ async fn fetch_playlist_items(
         }
         request_count += 1;
     }
+
     info!(
         "fetched {} items, in {} requests",
         fetched_playlist_items.len(),
         request_count
     );
+
     fetched_playlist_items.sort_by_key(|i| i.snippet.as_ref().and_then(|s| s.published_at));
     Ok(fetched_playlist_items)
 }
@@ -424,13 +441,15 @@ fn build_channel_from_playlist(playlist: api::Playlist) -> Channel {
     let mut itunes_channel_builder = ITunesChannelExtensionBuilder::default();
 
     if let Some(mut snippet) = playlist.snippet {
-        channel_builder.description(snippet.description.take().unwrap_or("".to_owned()));
-        channel_builder.title(snippet.title.take().unwrap_or("".to_owned()));
+        channel_builder.description(snippet.description.take().unwrap_or_default());
+        channel_builder.title(snippet.title.take().unwrap_or_default());
         channel_builder.language(snippet.default_language.take());
+
         channel_builder.link(format!(
             "https://www.youtube.com/playlist?list={}",
             playlist.id.unwrap_or_default()
         ));
+
         if let Some(mut thumb) = get_thumb!(snippet) {
             itunes_channel_builder.image(thumb.url.take());
         }
@@ -448,6 +467,7 @@ async fn fetch_playlist(id: String, api_key: &String) -> Result<api::Playlist, e
         .clear_scopes()
         .add_id(&id)
         .param("key", api_key);
+
     let result = playlist_request.doit().await?;
     let playlist = result
         .1
@@ -456,6 +476,7 @@ async fn fetch_playlist(id: String, api_key: &String) -> Result<api::Playlist, e
         .first()
         .ok_or(eyre!("youtube returned no playlist with id {:?}", id))?
         .clone();
+
     Ok(playlist)
 }
 
@@ -499,9 +520,13 @@ fn get_youtube_hub() -> YouTube<hyper_rustls::HttpsConnector<HttpConnector>> {
     YouTube::new(client, NoAuth)
 }
 
+// =========================
+// Redis-cached wrappers
+// =========================
+
 #[io_cached(
     map_error = r##"|e| eyre::Error::new(e)"##,
-    ty = "AsyncRedisCache<Url, Url>",
+    ty = "AsyncRedisCache<String, String>",
     create = r##" {
         AsyncRedisCache::new("cached_yt_stream_url=", std::time::Duration::from_secs(18000))
             .set_refresh(false)
@@ -511,10 +536,15 @@ fn get_youtube_hub() -> YouTube<hyper_rustls::HttpsConnector<HttpConnector>> {
             .expect("get_youtube_stream_url cache")
 } "##
 )]
-async fn get_youtube_stream_url(url: &Url) -> eyre::Result<Url> {
+async fn get_youtube_stream_url_cached(url: String) -> eyre::Result<String> {
+    let url = Url::parse(&url)?;
     debug!("getting stream_url for yt video: {}", url);
+
     let extra_args: Vec<String> =
-        serde_json::from_str(conf().get(ConfName::YoutubeYtDlpExtraArgs)?.as_str()).map_err(|_| eyre!(r#"failed to parse YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS allowed syntax is ["arg1#", "arg2", "arg3", ...]"#))?;
+        serde_json::from_str(conf().get(ConfName::YoutubeYtDlpExtraArgs)?.as_str()).map_err(|_| {
+            eyre!(r#"failed to parse YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS allowed syntax is ["arg1", "arg2", "arg3", ...]"#)
+        })?;
+
     let mut command = Command::new("yt-dlp");
     command
         .arg("-f")
@@ -531,21 +561,18 @@ async fn get_youtube_stream_url(url: &Url) -> eyre::Result<Url> {
     match output {
         Ok(x) => {
             let raw_url = std::str::from_utf8(&x.stdout).unwrap_or_default();
-            match Url::from_str(raw_url) {
-                Ok(url) => Ok(url),
-                Err(e) => {
-                    warn!(
-                        "error while parsing stream url using yt-dlp:\nerror: {}\nyt-dlp stdout: {}\nyt-dlp stderr: {}",
-                        e.to_string(),
-                        raw_url,
-                        std::str::from_utf8(&x.stderr).unwrap_or_default()
-                    );
-                    Err(eyre::eyre!(e))
-                }
-            }
+            Ok(raw_url.trim().to_string())
         }
         Err(e) => Err(eyre::eyre!(e)),
     }
+}
+
+async fn get_youtube_stream_url(url: &Url) -> eyre::Result<Url> {
+    let raw = get_youtube_stream_url_cached(url.as_str().to_string()).await?;
+    Url::parse(raw.trim()).map_err(|e| {
+        warn!("error while parsing stream url from cached yt-dlp output: {e}; raw={raw}");
+        eyre::eyre!(e)
+    })
 }
 
 async fn feed_url_for_yt_playlist(url: &Url) -> eyre::Result<Url> {
@@ -562,6 +589,7 @@ async fn feed_url_for_yt_playlist(url: &Url) -> eyre::Result<Url> {
 
     Ok(feed_url)
 }
+
 async fn feed_url_for_yt_atom(url: &Url) -> eyre::Result<Url> {
     Ok(url.clone())
 }
@@ -572,7 +600,12 @@ async fn feed_url_for_yt_channel(url: &Url) -> eyre::Result<Url> {
         return Ok(url.to_owned());
     }
     let url_with_channel_id = find_yt_channel_url_with_c_id(url).await?;
-    let channel_id = url_with_channel_id.path_segments().unwrap().last().unwrap();
+    let channel_id = url_with_channel_id
+        .path_segments()
+        .ok_or_else(|| eyre!("could not parse channel id"))?
+        .last()
+        .ok_or_else(|| eyre!("could not parse channel id"))?;
+
     let mut feed_url = Url::parse("https://www.youtube.com/feeds/videos.xml")?;
     feed_url
         .query_pairs_mut()
@@ -585,7 +618,7 @@ async fn feed_url_for_yt_channel(url: &Url) -> eyre::Result<Url> {
     not(test),
     io_cached(
         map_error = r##"|e| eyre::Error::new(e)"##,
-        ty = "AsyncRedisCache<Url, Url>",
+        ty = "AsyncRedisCache<String, String>",
         create = r##" {
         AsyncRedisCache::new("youtube_channel_username_to_id=", std::time::Duration::from_secs(9999999))
             .set_refresh(false)
@@ -596,8 +629,10 @@ async fn feed_url_for_yt_channel(url: &Url) -> eyre::Result<Url> {
 } "##
     )
 )]
-async fn find_yt_channel_url_with_c_id(url: &Url) -> eyre::Result<Url> {
+async fn find_yt_channel_url_with_c_id_cached(url: String) -> eyre::Result<String> {
+    let url = Url::parse(&url)?;
     info!("conversion not in cache, using yt-dlp for conversion...");
+
     let output = Command::new("yt-dlp")
         .arg("--playlist-items")
         .arg("0")
@@ -606,20 +641,14 @@ async fn find_yt_channel_url_with_c_id(url: &Url) -> eyre::Result<Url> {
         .arg(url.to_string())
         .output()
         .await?;
-    let conversion = std::str::from_utf8(&output.stdout);
-    let feed_url = match conversion {
-        Ok(feed_url) => feed_url,
-        Err(e) => {
-            warn!(
-                        "error while translating channel name using yt-dlp:\nerror: {}\nyt-dlp stdout: {}\nyt-dlp stderr: {}",
-                        e.to_string(),
-                        conversion.unwrap_or_default(),
-                        std::str::from_utf8(&output.stderr).unwrap_or_default()
-                    );
-            return Err(eyre::eyre!(e));
-        }
-    };
-    Ok(Url::parse(feed_url.trim())?)
+
+    let stdout = std::str::from_utf8(&output.stdout).unwrap_or_default();
+    Ok(stdout.trim().to_string())
+}
+
+async fn find_yt_channel_url_with_c_id(url: &Url) -> eyre::Result<Url> {
+    let raw = find_yt_channel_url_with_c_id_cached(url.as_str().to_string()).await?;
+    Ok(Url::parse(raw.trim())?)
 }
 
 fn convert_atom_to_rss(feed: Feed, duration_map: HashMap<String, Option<usize>>) -> String {
@@ -627,6 +656,7 @@ fn convert_atom_to_rss(feed: Feed, duration_map: HashMap<String, Option<usize>>)
     feed_builder.description(feed.description.map(|d| d.content).unwrap_or_default());
     feed_builder.title(feed.title.map(|d| d.content).unwrap_or_default());
     feed_builder.language(feed.language);
+
     let mut image_builder = ImageBuilder::default();
     image_builder.url(feed.icon.clone().map(|d| d.uri).unwrap_or_default());
     feed_builder.image(Some(image_builder.build()));
@@ -637,9 +667,11 @@ fn convert_atom_to_rss(feed: Feed, duration_map: HashMap<String, Option<usize>>)
             .map(|d| d.clone().href)
             .unwrap_or_default(),
     );
+
     let mut itunes_ext_builder = ITunesChannelExtensionBuilder::default();
     itunes_ext_builder.image(feed.icon.map(|d| d.uri));
     feed_builder.itunes_ext(Some(itunes_ext_builder.build()));
+
     let items = feed
         .entries
         .into_iter()
@@ -652,8 +684,10 @@ fn convert_atom_to_rss(feed: Feed, duration_map: HashMap<String, Option<usize>>)
                     .first()
                     .and_then(|d| Some(d.clone().description?.content)),
             );
+
             let link = entry.links.first().map(|d| d.clone().href);
             item_builder.link(link.clone());
+
             let mut itunes_item_builder = ITunesItemExtensionBuilder::default();
             let media = entry.media.first();
             itunes_item_builder.image(
@@ -661,18 +695,21 @@ fn convert_atom_to_rss(feed: Feed, duration_map: HashMap<String, Option<usize>>)
                     .and_then(|m| m.thumbnails.first())
                     .map(|t| t.clone().image.uri),
             );
+
             let duration = (|| -> Option<_> {
-                duration_map
-                    .get(&link?)
-                    .map(|s| s.map(|a| format!("{:02}:{:02}:{:02}", a / 3600, a / 60 % 60, a % 60)))
+                duration_map.get(&link?).map(|s| {
+                    s.map(|a| format!("{:02}:{:02}:{:02}", a / 3600, a / 60 % 60, a % 60))
+                })
             })()
             .flatten();
+
             itunes_item_builder.duration(duration);
             item_builder.itunes_ext(Some(itunes_item_builder.build()));
             item_builder.guid(Some(GuidBuilder::default().value(entry.id).build()));
             item_builder.build()
         })
         .collect::<Vec<Item>>();
+
     feed_builder.items(items);
     feed_builder.build().to_string()
 }
@@ -681,7 +718,7 @@ fn convert_atom_to_rss(feed: Feed, duration_map: HashMap<String, Option<usize>>)
     not(test),
     io_cached(
         map_error = r##"|e| eyre::Error::new(e)"##,
-        ty = "AsyncRedisCache<Url, Option<usize>>",
+        ty = "AsyncRedisCache<String, Option<usize>>",
         create = r##" {
         AsyncRedisCache::new("cached_yt_video_duration=", std::time::Duration::from_secs(86400))
             .set_refresh(false)
@@ -692,7 +729,8 @@ fn convert_atom_to_rss(feed: Feed, duration_map: HashMap<String, Option<usize>>)
 } "##
     )
 )]
-async fn get_youtube_video_duration_with_ytdlp(url: &Url) -> eyre::Result<Option<usize>> {
+async fn get_youtube_video_duration_with_ytdlp_cached(url: String) -> eyre::Result<Option<usize>> {
+    let url = Url::parse(&url)?;
     debug!("getting duration for yt video: {}", url);
 
     let output = Command::new("yt-dlp")
@@ -700,14 +738,15 @@ async fn get_youtube_video_duration_with_ytdlp(url: &Url) -> eyre::Result<Option
         .arg(url.to_string())
         .output()
         .await;
+
     if let Ok(x) = output {
-        let duration_str = std::str::from_utf8(&x.stdout).unwrap().trim().to_string();
+        let duration_str = std::str::from_utf8(&x.stdout).unwrap_or_default().trim().to_string();
         Ok(Some(
             parse_duration(&duration_str)
                 .unwrap_or_default()
                 .as_secs()
                 .try_into()
-                .unwrap(),
+                .unwrap_or(0),
         ))
     } else {
         warn!("could not parse youtube video duration");
@@ -715,27 +754,31 @@ async fn get_youtube_video_duration_with_ytdlp(url: &Url) -> eyre::Result<Option
     }
 }
 
+async fn get_youtube_video_duration_with_ytdlp(url: &Url) -> eyre::Result<Option<usize>> {
+    get_youtube_video_duration_with_ytdlp_cached(url.as_str().to_string()).await
+}
+
 fn parse_duration(duration_str: &str) -> Result<Duration, String> {
     let duration_parts: Vec<&str> = duration_str.split(':').rev().collect();
 
-    let seconds = match duration_parts.first() {
+    let seconds: u64 = match duration_parts.first() {
         Some(sec_str) => sec_str.parse().map_err(|_| "Invalid format".to_string())?,
         None => 0,
     };
 
-    let minutes = match duration_parts.get(1) {
+    let minutes: u64 = match duration_parts.get(1) {
         Some(min_str) => min_str.parse().map_err(|_| "Invalid format".to_string())?,
         None => 0,
     };
 
-    let hours = match duration_parts.get(2) {
+    let hours: u64 = match duration_parts.get(2) {
         Some(hour_str) => hour_str.parse().map_err(|_| "Invalid format".to_string())?,
         None => 0,
     };
 
-    let duration_secs = hours * 3600 + minutes * 60 + seconds;
-    Ok(Duration::from_secs(duration_secs))
+    Ok(Duration::from_secs(hours * 3600 + minutes * 60 + seconds))
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,12 +790,10 @@ mod tests {
 
         let playlist = fetch_playlist(id, &api_key).await.unwrap();
 
-        println!("{:?}", &playlist.clone().id.unwrap().clone());
         let items = fetch_playlist_items(&playlist.id.unwrap(), &api_key, 300)
             .await
             .unwrap();
 
-        println!("{:?}", items);
         assert!(!items.is_empty())
     }
 
@@ -763,12 +804,10 @@ mod tests {
 
         let playlist = fetch_playlist(id, &api_key).await.unwrap();
 
-        println!("{:?}", &playlist.clone().id.unwrap().clone());
         let items = fetch_playlist_items(&playlist.id.unwrap(), &api_key, 13)
             .await
             .unwrap();
 
-        println!("{:?}", items);
         assert!(!items.is_empty());
         assert_eq!(items.len(), 13)
     }
@@ -780,12 +819,10 @@ mod tests {
 
         let playlist = fetch_playlist(id, &api_key).await.unwrap();
 
-        println!("{:?}", &playlist.clone().id.unwrap().clone());
         let items = fetch_playlist_items(&playlist.id.unwrap(), &api_key, 50)
             .await
             .unwrap();
 
-        println!("{:?}", items);
         assert!(!items.is_empty());
         assert_eq!(items.len(), 50)
     }
@@ -797,12 +834,10 @@ mod tests {
 
         let playlist = fetch_playlist(id, &api_key).await.unwrap();
 
-        println!("{:?}", &playlist.clone().id.unwrap().clone());
         let items = fetch_playlist_items(&playlist.id.unwrap(), &api_key, 600)
             .await
             .unwrap();
 
-        println!("{:?}", items);
         assert!(!items.is_empty());
         assert_eq!(items.len(), 600)
     }
@@ -816,7 +851,6 @@ mod tests {
 
         let channel = build_channel_from_playlist(playlist);
 
-        println!("{:?}", channel);
         assert!(!channel.description.is_empty());
         assert!(!channel.title.is_empty());
         assert!(channel.itunes_ext.unwrap().image.is_some());
@@ -828,8 +862,6 @@ mod tests {
         let api_key = conf().get(ConfName::YoutubeApiKey).unwrap();
 
         let result = fetch_playlist(id, &api_key).await;
-
-        println!("{:?}", result);
         assert!(result.is_ok());
 
         if let Ok(playlist) = result {
