@@ -7,7 +7,9 @@ use google_youtube3::{
     api::{self, PlaylistItem},
     hyper, hyper_rustls, YouTube,
 };
-use google_youtube3::common::DummyToken;
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
+use google_youtube3::common;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use std::{collections::HashMap, str::FromStr, time::Duration};
@@ -456,8 +458,19 @@ async fn fetch_playlist(id: String, api_key: &String) -> Result<api::Playlist, e
 }
 
 fn get_youtube_hub() -> YouTube<hyper_rustls::HttpsConnector<HttpConnector>> {
-    // API-key only; disable OAuth scopes on requests via `.clear_scopes()`
-    let auth = DummyToken;
+    // API-key only; we always call `.clear_scopes()` on requests.
+    // google-youtube3 still requires something that implements GetToken,
+    // so we provide a "never used" token provider.
+    #[derive(Clone)]
+    struct NoAuth;
+
+    impl common::GetToken for NoAuth {
+        fn token<'a>(&'a self, _scopes: &'a [&str]) -> common::GetTokenFuture<'a> {
+            Box::pin(async move { Err(common::Error::MissingToken) })
+        }
+    }
+
+    type Body = BoxBody<Bytes, hyper::Error>;
 
     let connector = hyper_rustls::HttpsConnectorBuilder::new()
         .with_native_roots()
@@ -466,10 +479,10 @@ fn get_youtube_hub() -> YouTube<hyper_rustls::HttpsConnector<HttpConnector>> {
         .enable_http1()
         .build();
 
-    let client: Client<_, hyper::body::Incoming> =
-        Client::builder(TokioExecutor::new()).build(connector);
+    // IMPORTANT: Force the legacy client's body type to match google_youtube3 expectations.
+    let client: Client<_, Body> = Client::builder(TokioExecutor::new()).build(connector);
 
-    YouTube::new(client, auth)
+    YouTube::new(client, NoAuth)
 }
 
 #[io_cached(
