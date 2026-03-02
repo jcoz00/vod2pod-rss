@@ -19,7 +19,6 @@ use hyper_util::rt::TokioExecutor;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::str::FromStr;
 use std::time::Duration;
 
 use async_trait::async_trait;
