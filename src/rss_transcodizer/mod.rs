@@ -132,23 +132,33 @@ fn inject_podcast_assets_tags(mut rss_xml: String, base_url: &Url) -> String {
     }
 
     // Build base URLs for assets.
-    let mut chapters_base = base_url.clone();
-    chapters_base.set_path(&format!(
-        "{}/yt/chapters/",
-        base_url.path().trim_end_matches('/')
-    ));
-    let mut transcript_base = base_url.clone();
-    transcript_base.set_path(&format!(
-        "{}/yt/transcripts/",
-        base_url.path().trim_end_matches('/')
-    ));
+    // IMPORTANT: never derive the base path from the *current request path*.
+    // Health checks hit /health frequently, which can otherwise poison absolute URLs
+    // into /health/yt/... inside RSS feeds.
+    //
+    // Instead, always build URLs from the public origin + configured SUBFOLDER.
+    let subfolder_raw = conf().get(ConfName::Subfolder).unwrap_or_else(|_| "/".to_string());
+    let subfolder = if subfolder_raw.trim().is_empty() || subfolder_raw.trim() == "/" {
+        "".to_string()
+    } else {
+        format!("/{}", subfolder_raw.trim_matches('/'))
+    };
+
+    // Keep scheme/host from base_url but force the configured subfolder path.
+    let mut origin = base_url.clone();
+    origin.set_query(None);
+    origin.set_fragment(None);
+    origin.set_path(&subfolder);
+
+    let mut chapters_base = origin.clone();
+    chapters_base.set_path(&format!("{}/yt/chapters/", subfolder));
+
+    let mut transcript_base = origin.clone();
+    transcript_base.set_path(&format!("{}/yt/transcripts/", subfolder));
 
     // Artwork endpoint (square jpeg) that fetches source art and caches in Redis.
-    let mut art_base = base_url.clone();
-    art_base.set_path(&format!(
-        "{}/yt/art/square.jpg",
-        base_url.path().trim_end_matches('/')
-    ));
+    let mut art_base = origin.clone();
+    art_base.set_path(&format!("{}/yt/art/square.jpg", subfolder));
 
     // Inject show-level Apple tags if missing (channel-specific, derived from channel title).
     rss_xml = inject_channel_level_apple_tags(rss_xml);
