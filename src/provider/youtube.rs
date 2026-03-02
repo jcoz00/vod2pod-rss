@@ -189,14 +189,14 @@ async fn fetch_from_api(id: IdType, api_key: String) -> eyre::Result<(Channel, V
             let duration_map = create_duration_url_map(&items, &api_key).await?;
 
             // Filter out Shorts (or any videos below a minimum duration) if configured.
-            // NOTE: this is best-effort; if we can't resolve duration for a video, we keep it.
+            // NOTE: best-effort; if we can't resolve duration for a video, we keep it.
             let min_seconds: u64 = conf()
                 .get(ConfName::YoutubeMinSeconds)
                 .unwrap_or_else(|_| "0".to_string())
                 .parse()
                 .unwrap_or(0);
 
-            let items = if min_seconds > 0 {
+            let items: Vec<PlaylistItem> = if min_seconds > 0 {
                 items
                     .into_iter()
                     .filter(|it| {
@@ -246,7 +246,7 @@ async fn fetch_from_api(id: IdType, api_key: String) -> eyre::Result<(Channel, V
                 .parse()
                 .unwrap_or(0);
 
-            let items = if min_seconds > 0 {
+            let items: Vec<PlaylistItem> = if min_seconds > 0 {
                 items
                     .into_iter()
                     .filter(|it| {
@@ -393,10 +393,27 @@ struct VideoExtraInfo {
     yt_category_id: Option<String>,
 }
 
+// iso8601_duration::Duration uses f32 fields (not Option).
+fn iso_duration_to_hms(d: &iso8601_duration::Duration) -> (u64, u64, u64) {
+    let mut h = if d.hour.is_finite() { d.hour.floor() as i64 } else { 0 };
+    let mut m = if d.minute.is_finite() { d.minute.floor() as i64 } else { 0 };
+    let mut s = if d.second.is_finite() { d.second.floor() as i64 } else { 0 };
+
+    // normalize overflow
+    if s >= 60 {
+        m += s / 60;
+        s %= 60;
+    }
+    if m >= 60 {
+        h += m / 60;
+        m %= 60;
+    }
+
+    (h.max(0) as u64, m.max(0) as u64, s.max(0) as u64)
+}
+
 fn duration_to_seconds(d: &iso8601_duration::Duration) -> u64 {
-    let h = d.hour.unwrap_or(0) as u64;
-    let m = d.minute.unwrap_or(0) as u64;
-    let s = d.second.unwrap_or(0) as u64;
+    let (h, m, s) = iso_duration_to_hms(d);
     h * 3600 + m * 60 + s
 }
 
@@ -483,14 +500,12 @@ fn build_channel_items_from_playlist(
                 None
             })?;
 
+            let (h, m, s) = iso_duration_to_hms(&video_infos.duration);
+            let duration_str = format!("{:02}:{:02}:{:02}", h, m, s);
+
             let itunes_item_extension = ITunesItemExtensionBuilder::default()
                 .summary(Some(description))
-                .duration(Some({
-                    let hours = video_infos.duration.hour;
-                    let minutes = video_infos.duration.minute;
-                    let seconds = video_infos.duration.second;
-                    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
-                }))
+                .duration(Some(duration_str))
                 .image(get_thumb!(snippet).and_then(|t| t.url))
                 .build();
 
