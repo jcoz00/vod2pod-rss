@@ -48,6 +48,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo build --release --target "$(cat /rust_platform.txt)"
 
+# Export the built binary to a stable location (no wildcard COPY later)
 RUN set -eux; \
   TGT="$(cat /rust_platform.txt)"; \
   install -D "/src/target/${TGT}/release/app" /out/vod2pod
@@ -60,6 +61,7 @@ FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS app
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Runtime deps + python/pip kept for the updater sidecar
 RUN set -eux; \
   apt-get update; \
   apt-get install -y --no-install-recommends \
@@ -72,7 +74,7 @@ RUN set -eux; \
   ; \
   rm -rf /var/lib/apt/lists/*
 
-# yt-dlp via pip (required for your updater sidecar)
+# Install yt-dlp via pip (sidecar will keep it updated)
 RUN set -eux; \
   python3 -m pip install --no-cache-dir -U pip --break-system-packages; \
   python3 -m pip install --no-cache-dir -U yt-dlp --break-system-packages; \
@@ -92,19 +94,19 @@ RUN set -eux; \
   rm -f /tmp/deno.zip; \
   deno --version
 
-# Rumble-friendly ffmpeg wrapper (ALL inside one RUN)
+# Rumble-friendly ffmpeg wrapper (NO heredoc; no Dockerfile parse issues)
 RUN set -eux; \
   mv /usr/bin/ffmpeg /usr/bin/ffmpeg.real; \
-  cat > /usr/local/bin/ffmpeg <<'EOF'
-#!/bin/sh
-set -eu
-ARGS="$*"
-if echo "$ARGS" | grep -Eiq '(rumble\.com|rmbl\.ws|sp\.rmbl\.ws)'; then
-  exec /usr/bin/ffmpeg.real -headers "Referer: https://rumble.com" -headers "Origin: https://rumble.com" "$@"
-else
-  exec /usr/bin/ffmpeg.real "$@"
-fi
-EOF
+  printf '%s\n' \
+'#!/bin/sh' \
+'set -eu' \
+'ARGS="$*"' \
+'if echo "$ARGS" | grep -Eiq "(rumble\.com|rmbl\.ws|sp\.rmbl\.ws)"; then' \
+'  exec /usr/bin/ffmpeg.real -headers "Referer: https://rumble.com" -headers "Origin: https://rumble.com" "$@"' \
+'else' \
+'  exec /usr/bin/ffmpeg.real "$@"' \
+'fi' \
+  > /usr/local/bin/ffmpeg; \
   chmod 0755 /usr/local/bin/ffmpeg
 
 COPY --from=builder /out/vod2pod /usr/local/bin/vod2pod
