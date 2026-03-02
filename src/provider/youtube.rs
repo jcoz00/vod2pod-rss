@@ -116,9 +116,13 @@ impl MediaProvider for YoutubeProvider {
                     channel_url
                 );
                 let feed = match channel_url.path() {
-                    path if path.starts_with("/playlist") => feed_url_for_yt_playlist(&channel_url).await,
+                    path if path.starts_with("/playlist") => {
+                        feed_url_for_yt_playlist(&channel_url).await
+                    }
                     path if path.starts_with("/feeds/") => feed_url_for_yt_atom(&channel_url).await,
-                    path if path.starts_with("/channel/") => feed_url_for_yt_channel(&channel_url).await,
+                    path if path.starts_with("/channel/") => {
+                        feed_url_for_yt_channel(&channel_url).await
+                    }
                     path if path.starts_with("/user/") => feed_url_for_yt_channel(&channel_url).await,
                     path if path.starts_with("/c/") => feed_url_for_yt_channel(&channel_url).await,
                     path if path.starts_with("/@") => feed_url_for_yt_channel(&channel_url).await,
@@ -252,11 +256,14 @@ fn apply_best_fit_itunes_category(channel: &mut Channel, infos: &HashMap<String,
     if let Some(ref mut itunes) = channel.itunes_ext {
         let mut cat = ITunesCategory::default();
         cat.set_text(&primary);
+
+        // rss 2.0.12 models subcategory as Option<Box<ITunesCategory>> (one nested subcategory)
         if let Some(sub) = secondary {
             let mut subcat = ITunesCategory::default();
             subcat.set_text(&sub);
-            cat.set_subcategory(vec![subcat]);
+            cat.set_subcategory(Some(Box::new(subcat)));
         }
+
         itunes.set_categories(vec![cat]);
     }
 }
