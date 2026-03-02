@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
+use tokio::fs;
 
 use async_trait::async_trait;
 use eyre::eyre;
@@ -187,6 +188,31 @@ async fn fetch_from_api(id: IdType, api_key: String) -> eyre::Result<(Channel, V
 
             let duration_map = create_duration_url_map(&items, &api_key).await?;
 
+            // Filter out Shorts (or any videos below a minimum duration) if configured.
+            // NOTE: this is best-effort; if we can't resolve duration for a video, we keep it.
+            let min_seconds: u64 = conf()
+                .get(ConfName::YoutubeMinSeconds)
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()
+                .unwrap_or(0);
+
+            let items = if min_seconds > 0 {
+                items
+                    .into_iter()
+                    .filter(|it| {
+                        let Some(snippet) = it.snippet.as_ref() else { return false };
+                        let Some(res) = snippet.resource_id.as_ref() else { return true };
+                        let Some(vid) = res.video_id.as_ref() else { return true };
+                        duration_map
+                            .get(vid)
+                            .map(|v| duration_to_seconds(&v.duration) >= min_seconds)
+                            .unwrap_or(true)
+                    })
+                    .collect()
+            } else {
+                items
+            };
+
             apply_best_fit_itunes_category(&mut rss_channel, &duration_map);
 
             let rss_items = build_channel_items_from_playlist(items, duration_map);
@@ -213,6 +239,29 @@ async fn fetch_from_api(id: IdType, api_key: String) -> eyre::Result<(Channel, V
             let items = fetch_playlist_items(&upload_playlist, &api_key, max_fetched_items).await?;
 
             let duration_map = create_duration_url_map(&items, &api_key).await?;
+
+            let min_seconds: u64 = conf()
+                .get(ConfName::YoutubeMinSeconds)
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()
+                .unwrap_or(0);
+
+            let items = if min_seconds > 0 {
+                items
+                    .into_iter()
+                    .filter(|it| {
+                        let Some(snippet) = it.snippet.as_ref() else { return false };
+                        let Some(res) = snippet.resource_id.as_ref() else { return true };
+                        let Some(vid) = res.video_id.as_ref() else { return true };
+                        duration_map
+                            .get(vid)
+                            .map(|v| duration_to_seconds(&v.duration) >= min_seconds)
+                            .unwrap_or(true)
+                    })
+                    .collect()
+            } else {
+                items
+            };
 
             apply_best_fit_itunes_category(&mut rss_channel, &duration_map);
 
@@ -342,6 +391,13 @@ async fn fetch_channel(id: String, api_key: &str) -> eyre::Result<api::Channel> 
 struct VideoExtraInfo {
     duration: iso8601_duration::Duration,
     yt_category_id: Option<String>,
+}
+
+fn duration_to_seconds(d: &iso8601_duration::Duration) -> u64 {
+    let h = d.hour.unwrap_or(0) as u64;
+    let m = d.minute.unwrap_or(0) as u64;
+    let s = d.second.unwrap_or(0) as u64;
+    h * 3600 + m * 60 + s
 }
 
 async fn create_duration_url_map(
@@ -607,6 +663,11 @@ async fn get_youtube_stream_url_cached(url: String) -> eyre::Result<String> {
     let url = Url::parse(&url)?;
     debug!("getting stream_url for yt video: {}", url);
 
+    // yt-dlp tries to write to ~/.cache by default; inside the container we often run
+    // as a non-root user with a read-only rootfs. Force a writable cache dir.
+    let cache_dir = "/tmp/yt-dlp-cache";
+    let _ = fs::create_dir_all(cache_dir).await;
+
     let extra_args: Vec<String> =
         serde_json::from_str(conf().get(ConfName::YoutubeYtDlpExtraArgs)?.as_str()).map_err(|_| {
             eyre!(r#"failed to parse YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS allowed syntax is ["arg1", "arg2", "arg3", ...]"#)
@@ -617,6 +678,8 @@ async fn get_youtube_stream_url_cached(url: String) -> eyre::Result<String> {
         .arg("-f")
         .arg("bestaudio")
         .arg("--get-url")
+        .arg("--cache-dir")
+        .arg(cache_dir)
         .arg("--no-playlist")
         .arg(url.as_str());
 
@@ -719,7 +782,12 @@ async fn find_yt_channel_url_with_c_id_cached(url: String) -> eyre::Result<Strin
     let url = Url::parse(&url)?;
     info!("conversion not in cache, using yt-dlp for conversion...");
 
+    let cache_dir = "/tmp/yt-dlp-cache";
+    let _ = fs::create_dir_all(cache_dir).await;
+
     let output = Command::new("yt-dlp")
+        .arg("--cache-dir")
+        .arg(cache_dir)
         .arg("--playlist-items")
         .arg("0")
         .arg("-O")
@@ -819,7 +887,12 @@ async fn get_youtube_video_duration_with_ytdlp_cached(url: String) -> eyre::Resu
     let url = Url::parse(&url)?;
     debug!("getting duration for yt video: {}", url);
 
+    let cache_dir = "/tmp/yt-dlp-cache";
+    let _ = fs::create_dir_all(cache_dir).await;
+
     let output = Command::new("yt-dlp")
+        .arg("--cache-dir")
+        .arg(cache_dir)
         .arg("--get-duration")
         .arg(url.to_string())
         .output()

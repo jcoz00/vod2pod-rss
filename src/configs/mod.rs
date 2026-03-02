@@ -16,6 +16,7 @@ pub enum ConfName {
     Mp3Bitrate,
     YoutubeApiKey,
     YoutubeMaxResults,
+    YoutubeMinSeconds,
     TwitchClientId,
     TwitchSecretKey,
     TranscodingEnabled,
@@ -108,6 +109,9 @@ impl Conf for EnvConf {
             }
             ConfName::YoutubeMaxResults => {
                 Ok(std::env::var("YOUTUBE_MAX_RESULTS").unwrap_or_else(|_| "300".to_string()))
+            }
+            ConfName::YoutubeMinSeconds => {
+                Ok(std::env::var("YOUTUBE_MIN_SECONDS").unwrap_or_else(|_| "0".to_string()))
             }
             ConfName::YoutubeYtDlpExtraArgs => {
                 Ok(std::env::var("YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS")
