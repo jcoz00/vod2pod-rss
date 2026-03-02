@@ -72,7 +72,8 @@ RUN set -eux; \
 # install yt-dlp via pip (so your sidecar can keep it updated)
 RUN set -eux; \
   python3 -m pip install --no-cache-dir --break-system-packages -U pip; \
-  python3 -m pip install --no-cache-dir --break-system-packages -U yt-dlp
+  python3 -m pip install --no-cache-dir --break-system-packages -U yt-dlp; \
+  rm -rf /root/.cache/pip || true
 
 # Install Deno appropriate for TARGETPLATFORM
 RUN set -eux; \
