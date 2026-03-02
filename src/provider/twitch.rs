@@ -1,9 +1,10 @@
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset};
 use log::{debug, info, warn};
-use redis::{FromRedisValue, ParsingError, ToRedisArgs};
+use redis::{FromRedisValue, RedisError, RedisResult, ToRedisArgs, Value as RedisValue};
 use regex::Regex;
 use reqwest::Url;
 use rss::{
@@ -11,8 +12,7 @@ use rss::{
     GuidBuilder, ImageBuilder, Item, ItemBuilder,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::time::{SystemTime, UNIX_EPOCH};
+use serde_json::Value as JsonValue;
 
 use crate::{
     configs::{conf, Conf, ConfName},
@@ -122,7 +122,7 @@ impl MediaProvider for TwitchProvider {
         ];
         #[cfg(not(test))]
         return twitch_whitelist;
-        #[cfg(test)] //this will allow test to use localhost ad still work
+        #[cfg(test)] // this will allow test to use localhost and still work
         return [
             twitch_whitelist,
             vec![regex::Regex::new(r"^http://127\.0\.0\.1:9871").unwrap()],
@@ -260,10 +260,13 @@ impl OAuthCredentials {
 }
 
 impl FromRedisValue for OAuthCredentials {
-    fn from_redis_value(v: redis::Value) -> Result<Self, ParsingError> {
+    fn from_redis_value(v: &RedisValue) -> RedisResult<Self> {
         let raw_json = String::from_redis_value(v)?;
         let credentials: OAuthCredentials = serde_json::from_str(&raw_json).map_err(|_e| {
-            ParsingError::from("redis twitch credential corrupted")
+            RedisError::from((
+                redis::ErrorKind::TypeError,
+                "redis twitch credential corrupted",
+            ))
         })?;
         Ok(credentials)
     }
@@ -315,7 +318,7 @@ async fn authorize(client_id: &str, client_secret: &str) -> eyre::Result<OAuthCr
 
         if response.status().is_success() {
             let body = response.text().await?;
-            let credentials: Value = serde_json::from_str(&body)?;
+            let credentials: JsonValue = serde_json::from_str(&body)?;
 
             let oauth_token = credentials["access_token"]
                 .as_str()
@@ -331,10 +334,10 @@ async fn authorize(client_id: &str, client_secret: &str) -> eyre::Result<OAuthCr
                 oauth_expire_epoch,
             };
 
-            () = redis::cmd("SET")
+            redis::cmd("SET")
                 .arg(OAuthCredentials::key())
                 .arg(oauth_credentials.clone())
-                .query_async(&mut redis)
+                .query_async::<()>(&mut redis)
                 .await?;
 
             info!(
@@ -373,6 +376,7 @@ fn vod_to_rss_item_converter(vod: Video) -> Item {
     let title = vod.title;
     let description = title.clone();
     let published_at = vod.created_at;
+
     let mut item_builder = ItemBuilder::default();
     item_builder.title(Some(title.clone()));
     item_builder.description(Some(description.clone()));
@@ -390,6 +394,7 @@ fn vod_to_rss_item_converter(vod: Video) -> Item {
             }
         },
     ));
+
     let itunes_item_extension = ITunesItemExtensionBuilder::default()
         .summary(Some(description))
         .duration(Some({
@@ -429,6 +434,7 @@ fn vod_to_rss_item_converter(vod: Video) -> Item {
                 .replace("%{height}", "288"),
         ))
         .build();
+
     item_builder.itunes_ext(Some(itunes_item_extension));
     item_builder.build()
 }
