@@ -86,18 +86,19 @@ RUN set -eux; \
   rm -f /tmp/deno.zip
 
 # Rumble-friendly ffmpeg wrapper (single RUN so Dockerfile parses correctly)
+# Rumble-friendly ffmpeg wrapper (no heredoc, BuildKit-safe)
 RUN set -eux; \
   mv /usr/bin/ffmpeg /usr/bin/ffmpeg.real; \
-  cat > /usr/local/bin/ffmpeg <<'EOF'; \
-#!/bin/sh
-set -eu
-ARGS="$*"
-if echo "$ARGS" | grep -Eiq '(rumble\.com|rmbl\.ws|sp\.rmbl\.ws)'; then
-  exec /usr/bin/ffmpeg.real -headers "Referer: https://rumble.com" -headers "Origin: https://rumble.com" "$@"
-else
-  exec /usr/bin/ffmpeg.real "$@"
-fi
-EOF \
+  printf '%s\n' \
+'#!/bin/sh' \
+'set -eu' \
+'ARGS="$*"' \
+'if echo "$ARGS" | grep -Eiq '"'"'(rumble\.com|rmbl\.ws|sp\.rmbl\.ws)'"'"'; then' \
+'  exec /usr/bin/ffmpeg.real -headers "Referer: https://rumble.com" -headers "Origin: https://rumble.com" "$@"' \
+'else' \
+'  exec /usr/bin/ffmpeg.real "$@"' \
+'fi' \
+  > /usr/local/bin/ffmpeg; \
   chmod 0755 /usr/local/bin/ffmpeg
 
 COPY --from=builder /out/vod2pod /usr/local/bin/vod2pod
