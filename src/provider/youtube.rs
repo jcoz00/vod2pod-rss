@@ -617,20 +617,39 @@ async fn get_youtube_stream_url_cached(url: String) -> eyre::Result<String> {
         .arg("-f")
         .arg("bestaudio")
         .arg("--get-url")
+        .arg("--no-playlist")
         .arg(url.as_str());
 
     for arg in extra_args {
         command.arg(arg);
     }
 
-    let output = command.output().await;
+    let output = command.output().await?;
 
-    match output {
-        Ok(x) => {
-            let raw_url = std::str::from_utf8(&x.stdout).unwrap_or_default();
-            Ok(raw_url.trim().to_string())
+    // If yt-dlp failed, DO NOT cache an empty string.
+    if !output.status.success() {
+        let stderr = std::str::from_utf8(&output.stderr).unwrap_or_default();
+        let stdout = std::str::from_utf8(&output.stdout).unwrap_or_default();
+        warn!(
+            "yt-dlp --get-url failed (status={}): stdout='{}' stderr='{}'",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        );
+        return Err(eyre!("yt-dlp --get-url failed: {}", stderr.trim()));
+    }
+
+    // yt-dlp can return multiple URLs (newline-separated). Grab the first non-empty line.
+    let stdout = std::str::from_utf8(&output.stdout).unwrap_or_default();
+    let first = stdout.lines().map(|l| l.trim()).find(|l| !l.is_empty());
+
+    match first {
+        Some(line) => Ok(line.to_string()),
+        None => {
+            let stderr = std::str::from_utf8(&output.stderr).unwrap_or_default();
+            warn!("yt-dlp returned empty stdout for --get-url; stderr='{}'", stderr.trim());
+            Err(eyre!("yt-dlp returned empty stdout for --get-url"))
         }
-        Err(e) => Err(eyre::eyre!(e)),
     }
 }
 
