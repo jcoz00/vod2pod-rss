@@ -1016,7 +1016,7 @@ mod tests {
         assert_eq!(items.len(), 600)
     }
 
-    #[test(tokio::test)]
+    #[tokio::test]
     async fn test_build_channel_for_playlist_requires_api_key() {
         let id = "PLJmimp-uZX42T7ONp1FLXQDJrRxZ-_1Ct".to_string();
         let api_key = conf().get(ConfName::YoutubeApiKey).unwrap();
@@ -1030,7 +1030,7 @@ mod tests {
         assert!(channel.itunes_ext.unwrap().image.is_some());
     }
 
-    #[test(tokio::test)]
+    #[tokio::test]
     async fn test_fetch_playlist_requires_api_key() {
         let id = "PLJmimp-uZX42T7ONp1FLXQDJrRxZ-_1Ct".to_string();
         let api_key = conf().get(ConfName::YoutubeApiKey).unwrap();
@@ -1044,7 +1044,7 @@ mod tests {
         }
     }
 
-    #[test(tokio::test)]
+    #[tokio::test]
     async fn test_fetch_youtube_channel_by_name_requires_api_key() {
         let provider = YoutubeProvider;
         let Ok(_api_key) = conf().get(ConfName::YoutubeApiKey) else {

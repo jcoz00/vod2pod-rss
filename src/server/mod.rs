@@ -43,25 +43,28 @@ pub fn spawn_server(listener: TcpListener) -> eyre::Result<Server> {
                             .guard(guard::Any(guard::Get()).or(guard::Head()))
                             .to(transcode_to_mp3),
                     )
+                    // Apple Podcasts uses HEAD to probe assets. If HEAD responses don't include
+                    // a non-zero Content-Length, Apple ignores chapters/transcripts/art.
+                    // Actix's automatic HEAD handling can omit Content-Length for some handlers,
+                    // so we register explicit HEAD handlers for these assets.
                     .route("transcodize_rss", web::get().to(transcodize_rss))
-                    .route("transcodize_rss", web::head().to(transcodize_rss))
                     .service(
                         web::resource("yt/chapters/{video_id}.json")
                             .name("yt_chapters")
-                            .guard(guard::Any(guard::Get()).or(guard::Head()))
-                            .to(yt_chapters),
+                            .route(web::get().to(yt_chapters))
+                            .route(web::head().to(yt_chapters_head)),
                     )
                     .service(
                         web::resource("yt/transcripts/{video_id}.vtt")
                             .name("yt_transcript")
-                            .guard(guard::Any(guard::Get()).or(guard::Head()))
-                            .to(yt_transcript),
+                            .route(web::get().to(yt_transcript))
+                            .route(web::head().to(yt_transcript_head)),
                     )
                     .service(
                         web::resource("yt/art/square.jpg")
                             .name("yt_square_art")
-                            .guard(guard::Any(guard::Get()).or(guard::Head()))
-                            .to(yt_square_art),
+                            .route(web::get().to(yt_square_art))
+                            .route(web::head().to(yt_square_art_head)),
                     )
                     .service(
                         web::resource("health")
@@ -101,10 +104,6 @@ async fn transcodize_rss(
     req: HttpRequest,
     query: web::Query<HashMap<String, String>>,
 ) -> HttpResponse {
-    if req.method() == http::Method::HEAD {
-        return HttpResponse::Ok().finish();
-    }
-
     let start_time = Instant::now();
 
     let should_transcode = match conf().get(ConfName::TranscodingEnabled) {
@@ -217,14 +216,6 @@ struct VideoIdPath {
 }
 
 async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResponse {
-    if req.method() == http::Method::HEAD {
-        // Apple Podcasts (and others) will frequently HEAD these URLs before GET.
-        // Return a correct Content-Type even for HEAD, or clients may ignore the endpoint.
-        return HttpResponse::Ok()
-            .content_type("application/json+chapters")
-            .finish();
-    }
-
     let video_id = path.into_inner().video_id;
     let key = format!("yt:chapters:{video_id}");
 
@@ -243,12 +234,6 @@ async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResp
         // If we don't include Content-Length, Cloudflare responds with `content-length: 0`
         // and Apple ignores chapters.
         let len = body.len().to_string();
-        if req.method() == http::Method::HEAD {
-            return HttpResponse::Ok()
-                .content_type("application/json+chapters")
-                .insert_header((http::header::CONTENT_LENGTH, len))
-                .finish();
-        }
         return HttpResponse::Ok()
             .content_type("application/json+chapters")
             .insert_header((http::header::CONTENT_LENGTH, len))
@@ -335,17 +320,105 @@ async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResp
         .await
         .unwrap_or_default();
 
-    if req.method() == http::Method::HEAD {
-        return HttpResponse::Ok()
-            .content_type("application/json+chapters")
-            .insert_header((http::header::CONTENT_LENGTH, payload_len))
-            .finish();
-    }
-
     HttpResponse::Ok()
         .content_type("application/json+chapters")
         .insert_header((http::header::CONTENT_LENGTH, payload_len))
         .body(payload)
+}
+
+// Explicit HEAD handler for chapters.
+// Apple Podcasts relies on a non-zero Content-Length on HEAD responses.
+async fn yt_chapters_head(_req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResponse {
+    let video_id = path.into_inner().video_id;
+    let key = format!("yt:chapters:{video_id}");
+
+    let Ok(mut redis) = crate::get_redis_client().await else {
+        return HttpResponse::InternalServerError().finish();
+    };
+
+    let cached: Option<String> = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    if let Some(body) = cached {
+        return HttpResponse::Ok()
+            .content_type("application/json+chapters")
+            .insert_header((http::header::CONTENT_LENGTH, body.len().to_string()))
+            .finish();
+    }
+
+    // Same extraction logic as GET, but do not include a body.
+    let watch_url = format!("https://www.youtube.com/watch?v={video_id}");
+    let out = Command::new("yt-dlp")
+        .arg("-j")
+        .arg("--no-playlist")
+        .arg(&watch_url)
+        .output()
+        .await;
+
+    let json = match out {
+        Ok(x) if x.status.success() => {
+            let stdout = String::from_utf8_lossy(&x.stdout);
+            serde_json::from_str::<JsonValue>(stdout.trim()).ok()
+        }
+        _ => None,
+    };
+
+    fn format_timestamp(sec: f64) -> String {
+        let total = if sec.is_finite() && sec > 0.0 { sec } else { 0.0 };
+        let whole = total.floor() as u64;
+        let h = whole / 3600;
+        let m = (whole % 3600) / 60;
+        let s = whole % 60;
+        format!("{:02}:{:02}:{:02}", h, m, s)
+    }
+
+    let chapters = json
+        .as_ref()
+        .and_then(|j| j.get("chapters"))
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out_chapters = Vec::new();
+    for c in chapters {
+        let start = c
+            .get("start_time")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let title = c
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        out_chapters.push(serde_json::json!({
+            "startTime": format_timestamp(start),
+            "title": title,
+        }));
+    }
+
+    let payload = serde_json::json!({
+        "version": "1.2.0",
+        "chapters": out_chapters,
+    })
+    .to_string();
+
+    // Cache (30 days) so subsequent GET/HEAD can use it.
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&payload)
+        .arg("EX")
+        .arg(60_u64 * 60 * 24 * 30)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    HttpResponse::Ok()
+        .content_type("application/json+chapters")
+        .insert_header((http::header::CONTENT_LENGTH, payload.len().to_string()))
+        .finish()
 }
 
 async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResponse {
@@ -364,12 +437,6 @@ async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpRe
 
     if let Some(body) = cached {
         let len = body.len().to_string();
-        if req.method() == http::Method::HEAD {
-            return HttpResponse::Ok()
-                .content_type("text/vtt")
-                .insert_header((http::header::CONTENT_LENGTH, len))
-                .finish();
-        }
         return HttpResponse::Ok()
             .content_type("text/vtt")
             .insert_header((http::header::CONTENT_LENGTH, len))
@@ -432,17 +499,91 @@ async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpRe
         .await
         .unwrap_or_default();
 
-    if req.method() == http::Method::HEAD {
-        return HttpResponse::Ok()
-            .content_type("text/vtt")
-            .insert_header((http::header::CONTENT_LENGTH, payload_len))
-            .finish();
-    }
-
     HttpResponse::Ok()
         .content_type("text/vtt")
         .insert_header((http::header::CONTENT_LENGTH, payload_len))
         .body(payload)
+}
+
+// Explicit HEAD handler for transcripts.
+// Apple Podcasts relies on a non-zero Content-Length on HEAD responses.
+async fn yt_transcript_head(_req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResponse {
+    let video_id = path.into_inner().video_id;
+    let key = format!("yt:transcript:{video_id}");
+
+    let Ok(mut redis) = crate::get_redis_client().await else {
+        return HttpResponse::InternalServerError().finish();
+    };
+
+    let cached: Option<String> = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    if let Some(body) = cached {
+        return HttpResponse::Ok()
+            .content_type("text/vtt")
+            .insert_header((http::header::CONTENT_LENGTH, body.len().to_string()))
+            .finish();
+    }
+
+    // Same extraction logic as GET, but do not include a body.
+    let watch_url = format!("https://www.youtube.com/watch?v={video_id}");
+
+    // Fetch yt-dlp JSON, then download the VTT.
+    let out = Command::new("yt-dlp")
+        .arg("-j")
+        .arg("--no-playlist")
+        .arg(&watch_url)
+        .output()
+        .await;
+
+    let json: JsonValue = match out {
+        Ok(x) if x.status.success() => {
+            let stdout = String::from_utf8_lossy(&x.stdout);
+            match serde_json::from_str(stdout.trim()) {
+                Ok(v) => v,
+                Err(_) => return HttpResponse::NotFound().finish(),
+            }
+        }
+        _ => return HttpResponse::NotFound().finish(),
+    };
+
+    let subs = json.get("automatic_captions").or_else(|| json.get("subtitles"));
+    let vtt_url = subs
+        .and_then(|s| s.get("en"))
+        .and_then(|arr| arr.as_array())
+        .and_then(|arr| arr.iter().find(|e| e.get("ext").and_then(|v| v.as_str()) == Some("vtt")))
+        .and_then(|e| e.get("url"))
+        .and_then(|u| u.as_str());
+
+    let Some(vtt_url) = vtt_url else {
+        return HttpResponse::NotFound().finish();
+    };
+
+    let body = match reqwest::get(vtt_url).await {
+        Ok(resp) => match resp.text().await {
+            Ok(t) if !t.trim().is_empty() => t,
+            _ => return HttpResponse::NotFound().finish(),
+        },
+        Err(_) => return HttpResponse::NotFound().finish(),
+    };
+
+    // Cache (30 days).
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&body)
+        .arg("EX")
+        .arg(60_u64 * 60 * 24 * 30)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_default();
+
+    HttpResponse::Ok()
+        .content_type("text/vtt")
+        .insert_header((http::header::CONTENT_LENGTH, body.len().to_string()))
+        .finish()
 }
 
 fn pick_best_vtt_url(json: Option<&JsonValue>) -> Option<String> {
@@ -499,10 +640,6 @@ struct ArtQuery {
 }
 
 async fn yt_square_art(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpResponse {
-    if req.method() == http::Method::HEAD {
-        return HttpResponse::Ok().content_type("image/jpeg").finish();
-    }
-
     // SSRF protection: only allow known image hosts used by YouTube.
     let Ok(src) = Url::parse(&query.src) else {
         return HttpResponse::BadRequest().body("invalid src url");
@@ -542,12 +679,6 @@ async fn yt_square_art(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpRes
 
     if let Some(bytes) = cached {
         let len = bytes.len().to_string();
-        if req.method() == http::Method::HEAD {
-            return HttpResponse::Ok()
-                .content_type("image/jpeg")
-                .insert_header((http::header::CONTENT_LENGTH, len))
-                .finish();
-        }
         return HttpResponse::Ok()
             .content_type("image/jpeg")
             .insert_header((http::header::CONTENT_LENGTH, len))
@@ -591,17 +722,28 @@ async fn yt_square_art(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpRes
         .await
         .unwrap_or_default();
 
-    if req.method() == http::Method::HEAD {
-        return HttpResponse::Ok()
-            .content_type("image/jpeg")
-            .insert_header((http::header::CONTENT_LENGTH, jpg_len))
-            .finish();
-    }
-
     HttpResponse::Ok()
         .content_type("image/jpeg")
         .insert_header((http::header::CONTENT_LENGTH, jpg_len))
         .body(jpg)
+}
+
+// Explicit HEAD handler for square art.
+async fn yt_square_art_head(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpResponse {
+    // We reuse the same resizing path to compute the exact byte length.
+    let resp = yt_square_art(req, query).await;
+    let len = resp
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let mut out = HttpResponse::Ok();
+    out.content_type("image/jpeg");
+    if let Some(l) = len {
+        out.insert_header((http::header::CONTENT_LENGTH, l));
+    }
+    out.finish()
 }
 
 fn render_square_jpeg(img: DynamicImage) -> eyre::Result<Vec<u8>> {
@@ -738,6 +880,7 @@ async fn transcode_to_mp3(req: HttpRequest, query: web::Query<TranscodizeQuery>)
     if req.method() == http::Method::HEAD {
         return HttpResponse::Ok()
             .insert_header(("Accept-Ranges", "bytes"))
+            .insert_header((http::header::CONTENT_LENGTH, expected_bytes.to_string()))
             .insert_header((
                 "Content-Range",
                 format!("bytes {start_bytes}-{end_bytes}/{total_streamable_bytes}"),

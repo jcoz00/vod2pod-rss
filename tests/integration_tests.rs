@@ -24,9 +24,16 @@ async fn fetch_yt_feed_by_channel_url_ok_requires_api_key() {
     let address = spawn_app();
     let client = reqwest::Client::new();
 
+    // NOTE: Some reqwest configurations in CI may not include the `.query()` helper.
+    // Build the query string manually for maximum compatibility.
+    let url = format!(
+        "{}/transcodize_rss?url={}",
+        &address,
+        urlencoding::encode("https://www.youtube.com/@madiele92")
+    );
+
     let response = client
-        .get(&format!("{}/transcodize_rss", &address))
-        .query(&[("url", "https://www.youtube.com/@madiele92")])
+        .get(&url)
         .send()
         .await
         .expect("Failed to execute request.");
@@ -49,12 +56,14 @@ async fn fetch_yt_feed_by_channel_id_url_ok_requires_api_key() {
     let address = spawn_app();
     let client = reqwest::Client::new();
 
+    let url = format!(
+        "{}/transcodize_rss?url={}",
+        &address,
+        urlencoding::encode("https://www.youtube.com/channel/UCXssEBQ8JWH1NacVIyQXe8g")
+    );
+
     let response = client
-        .get(&format!("{}/transcodize_rss", &address))
-        .query(&[(
-            "url",
-            "https://www.youtube.com/channel/UCXssEBQ8JWH1NacVIyQXe8g",
-        )])
+        .get(&url)
         .send()
         .await
         .expect("Failed to execute request.");
@@ -77,12 +86,14 @@ async fn fetch_yt_feed_by_playlist_url_ok() {
     let address = spawn_app();
     let client = reqwest::Client::new();
 
+    let url = format!(
+        "{}/transcodize_rss?url={}",
+        &address,
+        urlencoding::encode("https://www.youtube.com/playlist?list=PL589F357911E267F7")
+    );
+
     let response = client
-        .get(&format!("{}/transcodize_rss", &address))
-        .query(&[(
-            "url",
-            "https://www.youtube.com/playlist?list=PL589F357911E267F7",
-        )])
+        .get(&url)
         .send()
         .await
         .expect("Failed to execute request.");
@@ -111,9 +122,14 @@ async fn fetch_twitch_feed_by_channel_url_ok_requires_api_key() {
     let address = spawn_app();
     let client = reqwest::Client::new();
 
+    let url = format!(
+        "{}/transcodize_rss?url={}",
+        &address,
+        urlencoding::encode("https://www.twitch.tv/twitch")
+    );
+
     let response = client
-        .get(&format!("{}/transcodize_rss", &address))
-        .query(&[("url", "https://www.twitch.tv/twitch")])
+        .get(&url)
         .send()
         .await
         .expect("Failed to execute request.");
