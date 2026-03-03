@@ -239,8 +239,19 @@ async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResp
         .unwrap_or_default();
 
     if let Some(body) = cached {
+        // IMPORTANT: Apple Podcasts does a HEAD request to this URL.
+        // If we don't include Content-Length, Cloudflare responds with `content-length: 0`
+        // and Apple ignores chapters.
+        let len = body.len().to_string();
+        if req.method() == http::Method::HEAD {
+            return HttpResponse::Ok()
+                .content_type("application/json+chapters")
+                .insert_header((http::header::CONTENT_LENGTH, len))
+                .finish();
+        }
         return HttpResponse::Ok()
             .content_type("application/json+chapters")
+            .insert_header((http::header::CONTENT_LENGTH, len))
             .body(body);
     }
 
@@ -312,6 +323,8 @@ async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResp
     })
     .to_string();
 
+    let payload_len = payload.len().to_string();
+
     // Cache (30 days). Even empty chapters are cached to keep the system stateless.
     let _: () = redis::cmd("SET")
         .arg(&key)
@@ -322,16 +335,20 @@ async fn yt_chapters(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResp
         .await
         .unwrap_or_default();
 
+    if req.method() == http::Method::HEAD {
+        return HttpResponse::Ok()
+            .content_type("application/json+chapters")
+            .insert_header((http::header::CONTENT_LENGTH, payload_len))
+            .finish();
+    }
+
     HttpResponse::Ok()
         .content_type("application/json+chapters")
+        .insert_header((http::header::CONTENT_LENGTH, payload_len))
         .body(payload)
 }
 
 async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpResponse {
-    if req.method() == http::Method::HEAD {
-        return HttpResponse::Ok().content_type("text/vtt").finish();
-    }
-
     let video_id = path.into_inner().video_id;
     let key = format!("yt:transcript:{video_id}:en");
 
@@ -346,7 +363,17 @@ async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpRe
         .unwrap_or_default();
 
     if let Some(body) = cached {
-        return HttpResponse::Ok().content_type("text/vtt").body(body);
+        let len = body.len().to_string();
+        if req.method() == http::Method::HEAD {
+            return HttpResponse::Ok()
+                .content_type("text/vtt")
+                .insert_header((http::header::CONTENT_LENGTH, len))
+                .finish();
+        }
+        return HttpResponse::Ok()
+            .content_type("text/vtt")
+            .insert_header((http::header::CONTENT_LENGTH, len))
+            .body(body);
     }
 
     let watch_url = format!("https://www.youtube.com/watch?v={video_id}");
@@ -393,6 +420,7 @@ async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpRe
 
     // If we can't fetch a transcript, return an empty but valid VTT.
     let payload = vtt_body.unwrap_or_else(|| "WEBVTT\n\n".to_string());
+    let payload_len = payload.len().to_string();
 
     // Cache (30 days).
     let _: () = redis::cmd("SET")
@@ -404,7 +432,17 @@ async fn yt_transcript(req: HttpRequest, path: web::Path<VideoIdPath>) -> HttpRe
         .await
         .unwrap_or_default();
 
-    HttpResponse::Ok().content_type("text/vtt").body(payload)
+    if req.method() == http::Method::HEAD {
+        return HttpResponse::Ok()
+            .content_type("text/vtt")
+            .insert_header((http::header::CONTENT_LENGTH, payload_len))
+            .finish();
+    }
+
+    HttpResponse::Ok()
+        .content_type("text/vtt")
+        .insert_header((http::header::CONTENT_LENGTH, payload_len))
+        .body(payload)
 }
 
 fn pick_best_vtt_url(json: Option<&JsonValue>) -> Option<String> {
@@ -503,7 +541,17 @@ async fn yt_square_art(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpRes
         .unwrap_or_default();
 
     if let Some(bytes) = cached {
-        return HttpResponse::Ok().content_type("image/jpeg").body(bytes);
+        let len = bytes.len().to_string();
+        if req.method() == http::Method::HEAD {
+            return HttpResponse::Ok()
+                .content_type("image/jpeg")
+                .insert_header((http::header::CONTENT_LENGTH, len))
+                .finish();
+        }
+        return HttpResponse::Ok()
+            .content_type("image/jpeg")
+            .insert_header((http::header::CONTENT_LENGTH, len))
+            .body(bytes);
     }
 
     // Fetch the source image
@@ -531,6 +579,8 @@ async fn yt_square_art(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpRes
         Err(e) => return HttpResponse::InternalServerError().body(format!("render failed: {e}")),
     };
 
+    let jpg_len = jpg.len().to_string();
+
     // Cache 30 days
     let _: () = redis::cmd("SET")
         .arg(&key)
@@ -541,7 +591,17 @@ async fn yt_square_art(req: HttpRequest, query: web::Query<ArtQuery>) -> HttpRes
         .await
         .unwrap_or_default();
 
-    HttpResponse::Ok().content_type("image/jpeg").body(jpg)
+    if req.method() == http::Method::HEAD {
+        return HttpResponse::Ok()
+            .content_type("image/jpeg")
+            .insert_header((http::header::CONTENT_LENGTH, jpg_len))
+            .finish();
+    }
+
+    HttpResponse::Ok()
+        .content_type("image/jpeg")
+        .insert_header((http::header::CONTENT_LENGTH, jpg_len))
+        .body(jpg)
 }
 
 fn render_square_jpeg(img: DynamicImage) -> eyre::Result<Vec<u8>> {
