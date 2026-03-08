@@ -18,7 +18,7 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 # only what YOU directly use
 bytes = "1"
 http-body-util = "0.1"
-hyper-util = "=0.1.17"
+hyper-util = "=0.1.20"
 
 actix-rt = "=2.11.0"
 actix-web = "=4.13.0"
@@ -30,14 +30,14 @@ regex = "=1.12.3"
 reqwest = { version = "=0.13.2", features = ["json", "form"] }
 serde = "=1.0.228"
 serde_json = "=1.0.149"
-tokio = { version = "=1.49.0", features = ["macros", "process"]}
-uuid = { version= "=1.21.0", features = ["v4", "serde"]}
+tokio = { version = "=1.50.0", features = ["macros", "process"]}
+uuid = { version= "=1.22.0", features = ["v4", "serde"]}
 genawaiter = {version = "=0.99", features = ["futures03"] }
 openssl = { version = "*", features = ["vendored"] }
 rss = { version = "=2.0", features = ["serde"] }
 eyre = "=0.6"
 simple_logger = "=5.2"
-redis = { version = "0.32.7", features = ["tokio-comp"] }
+redis = { version = "1.0.5", features = ["tokio-comp"] }
 mime = "=0.3.17"
 cached = { version = "=0.56.0", features = ["redis_tokio"] }
 iso8601-duration = "=0.2.0"
