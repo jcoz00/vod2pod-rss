@@ -73,7 +73,6 @@ RUN set -eux; \
 COPY requirements.txt /tmp/requirements.txt
 
 RUN set -eux; \
-  python3 -m pip install --no-cache-dir --break-system-packages -U pip; \
   python3 -m pip install \
     --no-cache-dir \
     --break-system-packages \
