@@ -1,4 +1,5 @@
 version: 2
+
 updates:
   # Rust crates
   - package-ecosystem: "cargo"
@@ -7,7 +8,6 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
 
-    # Group only non-breaking routine updates
     groups:
       rust-minor-patch:
         patterns:
@@ -16,7 +16,6 @@ updates:
           - "minor"
           - "patch"
 
-    # Do not automatically propose breaking major upgrades
     ignore:
       - dependency-name: "actix-web"
         update-types:
@@ -41,14 +40,14 @@ updates:
       - dependency-name: "redis"
         update-types:
           - "version-update:semver-major"
+
   # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "monthly"
 
-  # Python (only if you actually have requirements.txt / pyproject.toml etc.)
-  # If you don’t, delete this block to avoid noise.
+  # yt-dlp
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
