@@ -69,11 +69,17 @@ RUN set -eux; \
   ; \
   rm -rf /var/lib/apt/lists/*
 
-# install yt-dlp via pip (so your sidecar can keep it updated)
+# Install yt-dlp from requirements.txt so Dependabot can update it
+COPY requirements.txt /tmp/requirements.txt
+
 RUN set -eux; \
   python3 -m pip install --no-cache-dir --break-system-packages -U pip; \
-  python3 -m pip install --no-cache-dir --break-system-packages -U yt-dlp; \
-  rm -rf /root/.cache/pip || true
+  python3 -m pip install \
+    --no-cache-dir \
+    --break-system-packages \
+    --requirement /tmp/requirements.txt; \
+  yt-dlp --version; \
+  rm -rf /root/.cache/pip /tmp/requirements.txt
 
 # Install Deno appropriate for TARGETPLATFORM
 RUN set -eux; \
