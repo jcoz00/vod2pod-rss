@@ -7,23 +7,40 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
 
-    # Optional: group updates so you don’t get spammed with PRs
+    # Group only non-breaking routine updates
     groups:
-      rust-dependencies:
+      rust-minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
-    # Optional safety: avoid auto major bumps on the HTTP stack
+    # Do not automatically propose breaking major upgrades
     ignore:
       - dependency-name: "actix-web"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "actix-http"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "hyper"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "reqwest"
-        update-types: ["version-update:semver-major"]
+        update-types:
+          - "version-update:semver-major"
 
+      - dependency-name: "actix-http"
+        update-types:
+          - "version-update:semver-major"
+
+      - dependency-name: "hyper"
+        update-types:
+          - "version-update:semver-major"
+
+      - dependency-name: "reqwest"
+        update-types:
+          - "version-update:semver-major"
+
+      - dependency-name: "cached"
+        update-types:
+          - "version-update:semver-major"
+
+      - dependency-name: "redis"
+        update-types:
+          - "version-update:semver-major"
   # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
