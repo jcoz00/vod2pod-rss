@@ -22,7 +22,7 @@ hyper-util = "=0.1.20"
 
 actix-rt = "=2.11.0"
 actix-web = "=4.14.0"
-async-trait = "=0.1.89"
+async-trait = "=0.1.91"
 url = { version="=2.5.8", features = ["serde"]}
 futures = "=0.3.32"
 log = "=0.4.33"
