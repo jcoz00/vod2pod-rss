@@ -21,7 +21,7 @@ http-body-util = "0.1"
 hyper-util = "=0.1.20"
 
 actix-rt = "=2.11.0"
-actix-web = "=4.14.0"
+actix-web = "=4.14.1"
 async-trait = "=0.1.91"
 url = { version="=2.5.8", features = ["serde"]}
 futures = "=0.3.33"
