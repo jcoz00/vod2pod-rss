@@ -689,6 +689,7 @@ async fn get_youtube_stream_url_cached(url: String) -> eyre::Result<String> {
         })?;
     
     let mut command = Command::new("yt-dlp");
+    
     command
         .arg("-f")
         .arg("bestaudio/best")
