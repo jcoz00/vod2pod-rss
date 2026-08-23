@@ -687,11 +687,11 @@ async fn get_youtube_stream_url_cached(url: String) -> eyre::Result<String> {
         serde_json::from_str(conf().get(ConfName::YoutubeYtDlpExtraArgs)?.as_str()).map_err(|_| {
             eyre!(r#"failed to parse YOUTUBE_YT_DLP_GET_URL_EXTRA_ARGS allowed syntax is ["arg1", "arg2", "arg3", ...]"#)
         })?;
-
+    
     let mut command = Command::new("yt-dlp");
     command
         .arg("-f")
-        .arg("bestaudio")
+        .arg("bestaudio/best")
         .arg("--get-url")
         .arg("--cache-dir")
         .arg(cache_dir)
