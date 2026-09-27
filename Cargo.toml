@@ -18,7 +18,7 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 # only what YOU directly use
 bytes = "1"
 http-body-util = "0.1"
-hyper-util = "=0.1.20"
+hyper-util = "=0.1.21"
 
 actix-rt = "=2.15.0"
 actix-web = "=4.15.0"
