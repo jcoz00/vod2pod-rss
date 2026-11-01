@@ -3,7 +3,7 @@
 # -----------------------------------------
 # Builder (build on Bookworm to match runtime glibc)
 # -----------------------------------------
-FROM --platform=$BUILDPLATFORM rust:1.93-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS builder
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
