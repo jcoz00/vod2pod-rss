@@ -3,7 +3,7 @@ authors = ["jcoz00"]
 edition = "2024"
 name = "vod2pod-rss"
 version = "1.2.5"
-rust-version = "1.93"
+rust-version = "1.95"
 
 [lib]
 path = "src/lib.rs"
