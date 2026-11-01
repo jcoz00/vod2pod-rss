@@ -20,6 +20,13 @@ use crate::configs::AudioCodec;
 use crate::provider;
 use crate::provider::MediaProvider;
 
+pub fn estimated_output_bytes(duration_secs: u64, bitrate_kbit: u64) -> u64 {
+    duration_secs
+        .saturating_mul(bitrate_kbit)
+        .saturating_mul(1000)
+        / 8
+}
+
 #[derive(Serialize)]
 pub struct FfmpegParameters {
     pub seek_time: f32,
@@ -69,7 +76,12 @@ impl Transcoder {
 
         command_ref
             .args(["-ss", ffmpeg_paramenters.seek_time.to_string().as_str()])
-            .args(["-i", ffmpeg_paramenters.url.as_str()])
+            .args([
+                "-protocol_whitelist",
+                "file,http,https,tcp,tls",
+                "-i",
+                ffmpeg_paramenters.url.as_str(),
+            ])
             .args([
                 "-acodec",
                 ffmpeg_paramenters.audio_codec.get_ffmpeg_codec_str(),
@@ -93,7 +105,7 @@ impl Transcoder {
             ])
             .args(["-hide_banner"])
             .args(["-loglevel", "error"])
-            .args(["pipe:stdout"]);
+            .arg("-");
         let args: Vec<String> = command_ref
             .get_args()
             .map(|x| x.to_string_lossy().to_string())
@@ -291,6 +303,11 @@ mod test {
                     info!("-ss {}", value);
                     assert_eq!(value, params.seek_time.to_string().as_str());
                 }
+                Some("-protocol_whitelist") => {
+                    let value = args.next().unwrap().to_str().unwrap();
+                    info!("-protocol_whitelist {}", value);
+                    assert_eq!(value, "file,http,https,tcp,tls");
+                }
                 Some("-i") => {
                     let value = args.next().unwrap().to_str().unwrap();
                     info!("-i {}", value);
@@ -318,8 +335,8 @@ mod test {
                     let value = args.next().unwrap().to_str().unwrap();
                     info!("-maxrate {}", value);
                 }
-                Some("pipe:stdout") => {
-                    info!("pipe:stdout");
+                Some("-") => {
+                    info!("-");
                 }
                 Some("-timeout") => {
                     let value = args.next().unwrap().to_str().unwrap();

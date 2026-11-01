@@ -58,6 +58,9 @@ Supported source URLs include:
 ### Core
 | Variable | Default | Notes |
 |---|---:|---|
+| `VOD2POD_RSS_HOST` | `0.0.0.0` | Host address to bind to. |
+| `VOD2POD_RSS_PORT` | `8080` | Port to listen on. |
+| `FFMPEG_TIMEOUT_SECONDS` | `300` | FFmpeg timeout setting. |
 | `TRANSCODE` | `true` | Set `false` to disable transcoding (feeds only). |
 | `MP3_BITRATE` | `192` | Bitrate for MP3 output when transcoding. |
 | `SUBFOLDER` | `/` | Root path when behind a reverse proxy. |
